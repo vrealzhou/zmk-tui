@@ -1,0 +1,13 @@
+# Mutation testing focuses on pure keymap/protocol logic. The TUI render,
+# terminal/OS transport, and hardware FFI layers are covered by integration
+# tests and manual hardware checks, but are poor mutation-test targets.
+exclude_globs = [
+    "src/main.rs",
+    "src/transport/**",
+    "src/tui/mod.rs",
+    "src/tui/connection.rs",
+    "src/tui/keyboard.rs",
+    "src/tui/render.rs",
+]
+test_tool = "cargo"
+timeout_multiplier = 2.0

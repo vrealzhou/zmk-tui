@@ -1,0 +1,19 @@
+src/protocol/frame.rs:78:9: replace Decoder::feed -> Result<Option<Vec<u8>>, FrameError> with Ok(Some(vec![]))
+src/protocol/frame.rs:78:9: replace Decoder::feed -> Result<Option<Vec<u8>>, FrameError> with Ok(Some(vec![0]))
+src/protocol/frame.rs:78:9: replace Decoder::feed -> Result<Option<Vec<u8>>, FrameError> with Ok(Some(vec![1]))
+src/protocol/frame.rs:80:25: replace == with != in Decoder::feed
+src/protocol/frame.rs:87:17: delete match arm SOF in Decoder::feed
+src/protocol/frame.rs:92:17: delete match arm ESC in Decoder::feed
+src/protocol/frame.rs:96:17: delete match arm EOF in Decoder::feed
+src/protocol/frame.rs:114:9: replace Decoder::push -> Result<(), FrameError> with Ok(())
+src/protocol/frame.rs:26:5: replace encode -> Vec<u8> with vec![1]
+src/protocol/frame.rs:114:30: replace >= with < in Decoder::push
+src/protocol/frame.rs:125:9: replace Decoder::feed_slice -> Result<(), FrameError> with Ok(())
+src/protocol/frame.rs:135:9: replace Decoder::decode -> Result<Vec<Vec<u8>>, FrameError> with Ok(vec![])
+src/protocol/frame.rs:135:9: replace Decoder::decode -> Result<Vec<Vec<u8>>, FrameError> with Ok(vec![vec![]])
+src/protocol/frame.rs:135:9: replace Decoder::decode -> Result<Vec<Vec<u8>>, FrameError> with Ok(vec![vec![0]])
+src/protocol/frame.rs:135:9: replace Decoder::decode -> Result<Vec<Vec<u8>>, FrameError> with Ok(vec![vec![1]])
+src/protocol/frame.rs:26:5: replace encode -> Vec<u8> with vec![]
+src/protocol/frame.rs:78:9: replace Decoder::feed -> Result<Option<Vec<u8>>, FrameError> with Ok(None)
+src/protocol/frame.rs:22:39: replace * with /
+src/protocol/frame.rs:26:5: replace encode -> Vec<u8> with vec![0]

@@ -1,0 +1,52 @@
+[package]
+name = "zmk-tui"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Terminal UI for editing ZMK keymaps over USB or Bluetooth"
+license = "MIT"
+readme = "README.md"
+
+[[bin]]
+name = "zmk-tui"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+bluest = "0.6.6"
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+futures = "0.3"
+prost = "0.14"
+ratatui = "0.29"
+serialport = "4"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+unicode-width = "0.2"
+uuid = "1"
+
+[build-dependencies]
+prost-build = "0.14"
+protoc-bin-vendored = "3"
+
+[dev-dependencies]
+cucumber = "0.21"
+serde_json = "1"
+tempfile = "3"
+
+# objc2 0.6.5's debug-only ObjC method verification mis-decodes
+# -[__NSConcreteUUID getUUIDBytes:], which bluest uses to read a BLE
+# peripheral identifier. The runtime ABI is a pointer to 16 bytes; suppressing
+# assertions in objc2 keeps `cargo run` usable while retaining them in our crate.
+[profile.dev.package.objc2]
+debug-assertions = false
+
+[profile.dev.package.objc2-foundation]
+debug-assertions = false
+
+[[test]]
+name = "cucumber"
+harness = false
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
