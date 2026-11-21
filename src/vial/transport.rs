@@ -44,7 +44,7 @@ impl VialDeviceInfo {
         } else {
             self.name.trim()
         };
-        format!("Vial · {name}")
+        format!("{name} (Vial)")
     }
 }
 

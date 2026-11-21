@@ -45,7 +45,7 @@ cargo run -- --simulate-vial
 ```
 
 Real keyboards are detected automatically: ZMK Studio keyboards appear as
-`ZMK Studio · …` serial ports and Vial keyboards as `Vial · …` raw-HID
+`… (ZMK Studio)` serial ports and Vial keyboards as `… (Vial)` raw-HID
 interfaces. When exactly one keyboard is visible, the app connects to it on
 startup using the right protocol — no flag or standard selection needed. If
 several are visible, the connect screen lists them with their standard; select
@@ -167,6 +167,7 @@ connected to another host will not appear in the Bluetooth list.
 | `s` | Save changes to the keyboard |
 | `d` | Discard unsaved changes (confirm) |
 | `R` | Restore stock firmware settings (confirm) |
+| `b` | Back to the device list (prompts if unsaved) |
 | `?` | Help |
 | `q` / `Ctrl-C` | Quit (prompts if unsaved) |
 

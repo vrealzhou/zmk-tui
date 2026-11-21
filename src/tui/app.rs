@@ -53,6 +53,14 @@ pub struct StartOptions {
     pub auto_connect: bool,
 }
 
+/// What to do after a save/discard completes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AfterSave {
+    Stay,
+    Quit,
+    Devices,
+}
+
 pub enum Msg {
     Key(KeyEvent),
     Mouse(MouseEvent),
@@ -72,11 +80,11 @@ pub enum Msg {
     },
     Saved {
         result: Result<(), StudioError>,
-        then_quit: bool,
+        then: AfterSave,
     },
     Discarded {
         result: Result<(), StudioError>,
-        then_quit: bool,
+        then: AfterSave,
     },
     KeymapRefreshed(Result<Keymap, StudioError>),
     /// A keymap and physical-layout refresh, used after a discard because the
@@ -438,8 +446,8 @@ impl App {
                 position,
                 binding,
             } => self.finish_binding_set(result, layer_id, position, binding),
-            Msg::Saved { result, then_quit } => self.finish_saved(result, then_quit),
-            Msg::Discarded { result, then_quit } => self.finish_discarded(result, then_quit),
+            Msg::Saved { result, then } => self.finish_saved(result, then),
+            Msg::Discarded { result, then } => self.finish_discarded(result, then),
             Msg::KeymapRefreshed(result) => self.finish_keymap_refresh(result),
             Msg::EditRefreshed(result) => self.finish_edit_refresh(result),
             _ => unreachable!("only edit messages reach this handler"),
@@ -474,7 +482,7 @@ impl App {
         self.toast("Binding updated — press s to save", StatusKind::Success);
     }
 
-    fn finish_saved(&mut self, result: Result<(), StudioError>, then_quit: bool) {
+    fn finish_saved(&mut self, result: Result<(), StudioError>, then: AfterSave) {
         if let Err(error) = result {
             self.handle_studio_error(error);
             return;
@@ -483,13 +491,20 @@ impl App {
             editor.dirty = false;
         }
         self.busy = None;
-        self.toast("Saved to keyboard", StatusKind::Success);
-        if then_quit {
-            self.should_quit = true;
+        match then {
+            AfterSave::Stay => self.toast("Saved to keyboard", StatusKind::Success),
+            AfterSave::Quit => {
+                self.toast("Saved to keyboard", StatusKind::Success);
+                self.should_quit = true;
+            }
+            AfterSave::Devices => {
+                self.leave_editor();
+                self.toast("Saved — choose a keyboard", StatusKind::Success);
+            }
         }
     }
 
-    fn finish_discarded(&mut self, result: Result<(), StudioError>, then_quit: bool) {
+    fn finish_discarded(&mut self, result: Result<(), StudioError>, then: AfterSave) {
         if let Err(error) = result {
             self.handle_studio_error(error);
             return;
@@ -498,11 +513,19 @@ impl App {
             editor.dirty = false;
         }
         self.busy = None;
-        self.toast("Discarded unsaved changes", StatusKind::Info);
-        if then_quit {
-            self.should_quit = true;
-        } else {
-            self.spawn_refresh_edit();
+        match then {
+            AfterSave::Stay => {
+                self.toast("Discarded unsaved changes", StatusKind::Info);
+                self.spawn_refresh_edit();
+            }
+            AfterSave::Quit => {
+                self.toast("Discarded unsaved changes", StatusKind::Info);
+                self.should_quit = true;
+            }
+            AfterSave::Devices => {
+                self.leave_editor();
+                self.toast("Discarded — choose a keyboard", StatusKind::Info);
+            }
         }
     }
 
@@ -774,10 +797,11 @@ impl App {
         match key.code {
             KeyCode::Enter => self.open_binding_editor(),
             KeyCode::Char('L') => self.open_layer_manager(),
+            KeyCode::Char('b') => self.request_back_to_devices(),
             KeyCode::Char('p') => self.open_layout_picker(),
             KeyCode::Char('s') => {
                 if self.require_unlocked() {
-                    self.spawn_save(false);
+                    self.spawn_save(AfterSave::Stay);
                 }
             }
             KeyCode::Char('d') => {
@@ -920,7 +944,7 @@ impl App {
             MouseTarget::BindingApply => self.press_modal_key(KeyCode::Enter),
             MouseTarget::EditorSave => {
                 if self.require_unlocked() {
-                    self.spawn_save(false);
+                    self.spawn_save(AfterSave::Stay);
                 }
             }
             MouseTarget::EditorDiscard => {
@@ -1011,6 +1035,9 @@ impl App {
             | UiAction::QuitSave
             | UiAction::QuitDiscard
             | UiAction::QuitAnyway
+            | UiAction::DevicesSave
+            | UiAction::DevicesDiscard
+            | UiAction::DevicesAnyway
             | UiAction::Close
             | UiAction::CheckUnlock) => self.apply_session_action(action),
         }
@@ -1091,6 +1118,9 @@ impl App {
             | UiAction::QuitSave
             | UiAction::QuitDiscard
             | UiAction::QuitAnyway
+            | UiAction::DevicesSave
+            | UiAction::DevicesDiscard
+            | UiAction::DevicesAnyway
             | UiAction::Close
             | UiAction::CheckUnlock) => self.apply_quit_action(action),
             _ => unreachable!("only session actions reach this handler"),
@@ -1102,13 +1132,13 @@ impl App {
             UiAction::Save => {
                 if self.require_unlocked() {
                     self.modal = None;
-                    self.spawn_save(false);
+                    self.spawn_save(AfterSave::Stay);
                 }
             }
             UiAction::Discard => {
                 if self.require_unlocked() {
                     self.modal = None;
-                    self.spawn_discard(false);
+                    self.spawn_discard(AfterSave::Stay);
                 }
             }
             UiAction::ResetSettings => {
@@ -1127,16 +1157,33 @@ impl App {
             UiAction::QuitSave => {
                 if self.require_unlocked() {
                     self.modal = None;
-                    self.spawn_save(true);
+                    self.spawn_save(AfterSave::Quit);
                 }
             }
             UiAction::QuitDiscard => {
                 if self.require_unlocked() {
                     self.modal = None;
-                    self.spawn_discard(true);
+                    self.spawn_discard(AfterSave::Quit);
                 }
             }
             UiAction::QuitAnyway => self.should_quit = true,
+            UiAction::DevicesSave => {
+                if self.require_unlocked() {
+                    self.modal = None;
+                    self.spawn_save(AfterSave::Devices);
+                }
+            }
+            UiAction::DevicesDiscard => {
+                if self.require_unlocked() {
+                    self.modal = None;
+                    self.spawn_discard(AfterSave::Devices);
+                }
+            }
+            UiAction::DevicesAnyway => {
+                self.modal = None;
+                self.leave_editor();
+                self.toast("Choose a keyboard", StatusKind::Info);
+            }
             UiAction::Close => self.modal = None,
             UiAction::CheckUnlock => {
                 if let Some(Modal::Unlock(unlock)) = &mut self.modal {
@@ -1275,6 +1322,35 @@ impl App {
             }
         }
         true
+    }
+
+    fn request_back_to_devices(&mut self) {
+        if self.editor.as_ref().is_some_and(|editor| editor.dirty) {
+            self.modal = Some(Modal::Confirm(ConfirmModal::devices()));
+            return;
+        }
+        self.leave_editor();
+        self.toast("Choose a keyboard", StatusKind::Info);
+    }
+
+    /// Drop the current device connection and return to a fresh device list.
+    /// Dropping the client closes the serial port, BLE link or raw-HID handle;
+    /// the next screen scans again instead of reusing stale state.
+    fn leave_editor(&mut self) {
+        self.auto_connect = false;
+        self.editor = None;
+        self.modal = None;
+        self.busy = None;
+        self.connect_inflight = false;
+        self.scanning_inflight = false;
+        self.snapshot_retry_at = None;
+        self.snapshot_attempts = 0;
+        self.pending_layer_select = None;
+        self.last_click = None;
+        self.simulator = None;
+        self.connect = ConnectState::default();
+        self.refresh_usb();
+        self.spawn_bluetooth_scan();
     }
 
     fn request_quit(&mut self) {
@@ -1787,23 +1863,23 @@ impl App {
         });
     }
 
-    fn spawn_save(&mut self, then_quit: bool) {
+    fn spawn_save(&mut self, then: AfterSave) {
         let Some(client) = self.client() else {
             return;
         };
-        self.busy = Some(if then_quit {
-            "Saving before quitting…".into()
-        } else {
-            "Saving…".into()
+        self.busy = Some(match then {
+            AfterSave::Quit => "Saving before quitting…".into(),
+            AfterSave::Devices => "Saving before returning…".into(),
+            AfterSave::Stay => "Saving…".into(),
         });
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let result = client.save_changes().await;
-            let _ = tx.send(Msg::Saved { result, then_quit });
+            let _ = tx.send(Msg::Saved { result, then });
         });
     }
 
-    fn spawn_discard(&mut self, then_quit: bool) {
+    fn spawn_discard(&mut self, then: AfterSave) {
         let Some(client) = self.client() else {
             return;
         };
@@ -1811,7 +1887,7 @@ impl App {
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let result = client.discard_changes().await;
-            let _ = tx.send(Msg::Discarded { result, then_quit });
+            let _ = tx.send(Msg::Discarded { result, then });
         });
     }
 

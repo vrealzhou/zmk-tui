@@ -1331,8 +1331,8 @@ fn connect_screen_labels_studio_and_vial_rows() {
     app.connect.usb_state.select(Some(0));
     let screen = screen_text(&mut app);
     assert!(screen.contains("USB / HID"), "{screen}");
-    assert!(screen.contains("ZMK Studio · Sofle"), "{screen}");
-    assert!(screen.contains("Vial · Sofle Vial"), "{screen}");
+    assert!(screen.contains("Sofle (ZMK Studio)"), "{screen}");
+    assert!(screen.contains("Sofle Vial (Vial)"), "{screen}");
 
     assert_eq!(app.connect.usb[0].standard(), "ZMK Studio");
     assert_eq!(app.connect.usb[1].standard(), "Vial");
@@ -1383,4 +1383,57 @@ fn auto_connect_only_when_exactly_one_keyboard_is_visible() {
         app.auto_connect_choice().is_none(),
         "two candidates must be left to the user"
     );
+}
+
+#[tokio::test]
+async fn back_returns_to_the_device_list_from_a_clean_editor() {
+    let (mut app, _rx) = connected_app().await;
+    press(&mut app, KeyCode::Char('b'));
+    assert!(app.editor.is_none());
+    assert!(app.modal.is_none());
+    assert!(!app.should_quit);
+    assert!(
+        app.status
+            .as_ref()
+            .is_some_and(|status| status.text.contains("Choose a keyboard"))
+    );
+}
+
+#[tokio::test]
+async fn back_with_unsaved_changes_can_leave_without_saving() {
+    let (mut app, _rx) = connected_app().await;
+    app.editor.as_mut().unwrap().dirty = true;
+    press(&mut app, KeyCode::Char('b'));
+    assert!(matches!(app.modal, Some(Modal::Confirm(_))));
+    press(&mut app, KeyCode::Char('b'));
+    assert!(app.editor.is_none());
+    assert!(app.modal.is_none());
+    assert!(!app.should_quit);
+}
+
+#[tokio::test]
+async fn back_with_unsaved_changes_can_save_then_leave() {
+    let (mut app, mut rx) = connected_app().await;
+    app.editor.as_mut().unwrap().dirty = true;
+    press(&mut app, KeyCode::Char('b'));
+    press(&mut app, KeyCode::Char('s'));
+    pump_until(&mut app, &mut rx, "save then devices", |app| {
+        app.editor.is_none() && app.busy.is_none()
+    })
+    .await;
+    assert!(
+        app.status
+            .as_ref()
+            .is_some_and(|status| status.text.contains("Saved"))
+    );
+    assert!(!app.should_quit);
+}
+
+#[tokio::test]
+async fn vial_editor_can_return_to_the_device_list() {
+    let (mut app, _rx) = connected_vial_app().await;
+    press(&mut app, KeyCode::Char('b'));
+    assert!(app.editor.is_none());
+    assert!(app.modal.is_none());
+    assert!(!app.should_quit);
 }

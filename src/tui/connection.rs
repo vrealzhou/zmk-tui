@@ -44,7 +44,12 @@ pub enum UsbEntry {
 impl UsbEntry {
     pub fn label(&self) -> String {
         match self {
-            Self::Studio(device) => format!("ZMK Studio · {}", device.label()),
+            Self::Studio(device) => match device.product.as_deref() {
+                Some(product) if !product.is_empty() => {
+                    format!("{product} (ZMK Studio)  {}", device.path)
+                }
+                _ => format!("{} (ZMK Studio)", device.path),
+            },
             Self::Vial(device) => device.label(),
         }
     }
@@ -63,7 +68,7 @@ impl UsbEntry {
         match self {
             Self::Studio(device) => DeviceChoice::Usb {
                 path: device.path.clone(),
-                label: format!("ZMK Studio · {}", device.label()),
+                label: self.label(),
             },
             Self::Vial(device) => DeviceChoice::Vial {
                 path: device.path.clone(),
@@ -255,7 +260,7 @@ async fn finish_vial_connection(
         .map_err(|error| friendly(&error))?;
     Ok(Connected {
         client: device,
-        label: format!("Vial · {}", info.name),
+        label: format!("{} (Vial)", info.name),
         kind,
         info,
         lock: LockState::Unlocked,
