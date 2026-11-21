@@ -8,7 +8,8 @@ use crossterm::event::{
 use ratatui::widgets::ListState;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::client::{StudioClient, StudioError, StudioEvent};
+use crate::client::{StudioError, StudioEvent};
+use crate::device::{Capabilities, DeviceClient};
 use crate::layout::{self, Direction};
 use crate::model::{
     Binding, Catalog, DeviceInfo, KeyGeometry, Keymap, LockState, PhysicalLayout, PhysicalLayouts,
@@ -29,11 +30,20 @@ const SNAPSHOT_RETRY_DELAY: Duration = Duration::from_secs(1);
 /// How many times a failed keymap read is retried before giving up.
 const MAX_SNAPSHOT_RETRIES: u32 = 5;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VialStart {
+    /// In-process Vial demo keyboard.
+    Simulate,
+    /// First USB raw-HID Vial interface.
+    Usb,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct StartOptions {
     pub port: Option<String>,
     pub ble: Option<String>,
     pub simulate: Option<SimulatedBoard>,
+    pub vial: Option<VialStart>,
 }
 
 pub enum Msg {
@@ -118,7 +128,8 @@ impl Default for ConnectState {
 }
 
 pub struct EditorState {
-    pub client: StudioClient,
+    pub client: DeviceClient,
+    pub capabilities: Capabilities,
     pub label: String,
     pub kind: ConnectionKind,
     pub info: DeviceInfo,
@@ -137,8 +148,10 @@ impl EditorState {
         let has_snapshot = connected.snapshot.is_some();
         let snapshot = connected.snapshot.unwrap_or_default();
         let locked = connected.lock.is_locked();
+        let capabilities = connected.client.capabilities();
         let mut editor = Self {
             client: connected.client,
+            capabilities,
             label: connected.label,
             kind: connected.kind,
             info: connected.info,
@@ -315,6 +328,16 @@ impl App {
     }
 
     pub fn on_start(&mut self) {
+        if let Some(vial) = self.start.vial {
+            self.connect_inflight = true;
+            self.busy = Some("Connecting to Vial keyboard…".into());
+            let tx = self.tx.clone();
+            tokio::spawn(async move {
+                let result = crate::tui::connection::connect_vial(vial).await;
+                let _ = tx.send(Msg::ConnectResult(result));
+            });
+            return;
+        }
         if let Some(board) = self.start.simulate {
             self.start_simulator(board);
             return;
@@ -1188,6 +1211,13 @@ impl App {
         let Some(editor) = &self.editor else {
             return;
         };
+        if !editor.capabilities.manage_layers {
+            self.toast(
+                "This Vial keyboard has a fixed layer count; only bindings can be edited",
+                StatusKind::Warning,
+            );
+            return;
+        }
         if editor.keymap.layers.is_empty() {
             self.toast("No layers loaded yet", StatusKind::Warning);
             return;
@@ -1401,10 +1431,7 @@ impl App {
                 self.last_lock_poll = Instant::now();
                 if !warnings.is_empty() {
                     self.toast(
-                        format!(
-                            "Connected to {name}; {} behavior(s) could not be read",
-                            warnings.len()
-                        ),
+                        format!("Connected to {name}; {} warning(s)", warnings.len()),
                         StatusKind::Warning,
                     );
                 } else if locked {
@@ -1653,10 +1680,7 @@ impl App {
                     );
                 } else {
                     self.toast(
-                        format!(
-                            "Keymap loaded; {} behavior(s) could not be read",
-                            warnings.len()
-                        ),
+                        format!("Keymap loaded; {} warning(s)", warnings.len()),
                         StatusKind::Warning,
                     );
                 }
@@ -1877,7 +1901,7 @@ impl App {
         }
     }
 
-    fn client(&self) -> Option<StudioClient> {
+    fn client(&self) -> Option<DeviceClient> {
         self.editor.as_ref().map(|editor| editor.client.clone())
     }
 

@@ -3,6 +3,7 @@ use std::time::Duration;
 use clap::Parser;
 use zmk_tui::simulator::SimulatedBoard;
 use zmk_tui::tui::StartOptions;
+use zmk_tui::tui::app::VialStart;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -35,6 +36,14 @@ struct Cli {
         default_missing_value = "corne"
     )]
     simulate: Option<SimulatedBoard>,
+
+    /// Edit the simulated Vial keyboard instead of a ZMK Studio device
+    #[arg(long, conflicts_with_all = ["port", "ble", "simulate", "vial"])]
+    simulate_vial: bool,
+
+    /// Edit the first Vial keyboard over USB raw HID (needs --features vial-hid)
+    #[arg(long, conflicts_with_all = ["port", "ble", "simulate", "simulate_vial"])]
+    vial: bool,
 }
 
 #[tokio::main]
@@ -46,10 +55,25 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if cli.vial && !cfg!(feature = "vial-hid") {
+        anyhow::bail!(
+            "this build has no Vial USB transport; rebuild with `cargo build --features vial-hid`"
+        );
+    }
+
+    let vial = if cli.simulate_vial {
+        Some(VialStart::Simulate)
+    } else if cli.vial {
+        Some(VialStart::Usb)
+    } else {
+        None
+    };
+
     zmk_tui::tui::run(StartOptions {
         port: cli.port,
         ble: cli.ble,
         simulate: cli.simulate,
+        vial,
     })
     .await
 }

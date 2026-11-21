@@ -35,6 +35,37 @@ For architecture, protocol, testing and contribution details, see the
 | --- | --- |
 | ![Behavior picker](docs/screenshots/binding-behavior.png) | ![Keycode picker](docs/screenshots/binding-param.png) |
 
+## Vial keyboards (experimental)
+
+The same editor can also edit keymaps on [Vial](https://get.vial.today)
+keyboards over USB raw HID. Start the in-process demo without hardware:
+
+```bash
+cargo run -- --simulate-vial
+```
+
+For a real keyboard, build with the optional HID transport and connect to the
+first Vial raw-HID interface:
+
+```bash
+cargo run --features vial-hid -- --vial
+```
+
+Vial support is intentionally keycode-only: bindings, layers (fixed count) and
+save/discard/reset work through the same UI. Macros, tap dance, combos, key
+overrides, QMK settings, encoders and physical-layout switching are not edited;
+keycodes this editor cannot express are shown as raw `0xNNNN` values and are
+preserved exactly. Edits are staged and only written on save, with read-back
+verification. See the [Vial integration notes](docs/vial-integration-feasibility.md)
+for protocol details, limitations and the hardware test checklist.
+
+`--list` for Vial devices (read-only) is available through the probe:
+
+```bash
+cargo run --features vial-hid --example vial_probe -- --list
+cargo run --features vial-hid --example vial_probe -- --real
+```
+
 ## Supported keyboards
 
 Any keyboard whose firmware exposes ZMK Studio works. The editor reads the

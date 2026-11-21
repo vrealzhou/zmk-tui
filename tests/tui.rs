@@ -17,7 +17,7 @@ use zmk_tui::model::{Binding, LockState};
 use zmk_tui::simulator::SimulatedBoard;
 use zmk_tui::transport::serial::UsbDevice;
 use zmk_tui::tui::StartOptions;
-use zmk_tui::tui::app::{App, Msg, Panel, StatusKind};
+use zmk_tui::tui::app::{App, Msg, Panel, StatusKind, VialStart};
 use zmk_tui::tui::connection::Snapshot;
 use zmk_tui::tui::modals::{Modal, Stage, UnlockModal, behavior_items};
 use zmk_tui::tui::mouse::{ListKind, MouseTarget};
@@ -134,6 +134,26 @@ async fn connected_app_for(board: SimulatedBoard) -> (App, UnboundedReceiver<Msg
 
 async fn connected_app() -> (App, UnboundedReceiver<Msg>) {
     connected_app_for(SimulatedBoard::Corne).await
+}
+
+async fn connected_vial_app() -> (App, UnboundedReceiver<Msg>) {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut app = App::new(
+        tx,
+        StartOptions {
+            vial: Some(VialStart::Simulate),
+            ..Default::default()
+        },
+    );
+    app.on_start();
+    pump_until(&mut app, &mut rx, "the Vial keymap", |app| {
+        app.editor
+            .as_ref()
+            .map(|editor| editor.keymap_loaded)
+            .unwrap_or(false)
+    })
+    .await;
+    (app, rx)
 }
 
 fn disconnected_app() -> App {
@@ -1187,4 +1207,104 @@ async fn vertical_navigation_follows_rendered_rows() {
         12,
         "Down keeps the same column on the next row"
     );
+}
+
+#[tokio::test]
+async fn vial_simulator_uses_the_same_editor_and_capabilities() {
+    let (mut app, mut rx) = connected_vial_app().await;
+    let editor = app.editor.as_ref().expect("editor");
+    assert_eq!(editor.info.name, "Simulated Vial 4x6");
+    assert_eq!(editor.keymap.layers.len(), 4);
+    assert_eq!(editor.catalog.len(), 14);
+    assert_eq!(editor.layouts.layouts[0].keys.len(), 24);
+    assert!(!editor.capabilities.manage_layers);
+    assert!(!editor.capabilities.switch_physical_layouts);
+    assert!(!editor.locked);
+
+    let screen = screen_text(&mut app);
+    for expected in ["Simulated Vial 4x6", "VIAL SIM", "Layer 0", "A"] {
+        assert!(
+            screen.contains(expected),
+            "missing {expected:?} in:\n{screen}"
+        );
+    }
+
+    // The same binding editor works; only the catalog behind it differs.
+    let b_value = keycodes::from_name("B").unwrap().value;
+    press(&mut app, KeyCode::Enter);
+    type_text(&mut app, "key press");
+    press(&mut app, KeyCode::Enter);
+    type_text(&mut app, "b");
+    press(&mut app, KeyCode::Enter);
+    let review = screen_text(&mut app);
+    assert!(review.contains("&kp B"), "{review}");
+    press(&mut app, KeyCode::Enter);
+    pump_until(&mut app, &mut rx, "the Vial binding update", |app| {
+        app.editor
+            .as_ref()
+            .map(|editor| {
+                editor.keymap.layers[0].bindings[0].param1 == b_value
+                    && editor.dirty
+                    && app.busy.is_none()
+            })
+            .unwrap_or(false)
+    })
+    .await;
+
+    press(&mut app, KeyCode::Char('s'));
+    pump_until(&mut app, &mut rx, "the Vial save", |app| {
+        app.busy.is_none()
+            && app
+                .editor
+                .as_ref()
+                .map(|editor| !editor.dirty)
+                .unwrap_or(false)
+    })
+    .await;
+    assert!(screen_text(&mut app).contains("Saved to keyboard"));
+}
+
+#[tokio::test]
+async fn vial_layer_manager_is_not_offered() {
+    let (mut app, _rx) = connected_vial_app().await;
+    press(&mut app, KeyCode::Char('L'));
+    assert!(app.modal.is_none());
+    let status = app.status.as_ref().expect("status");
+    assert!(status.text.contains("fixed layer count"));
+    assert_eq!(status.kind, StatusKind::Warning);
+}
+
+#[tokio::test]
+async fn vial_staged_edits_can_be_discarded() {
+    let (mut app, mut rx) = connected_vial_app().await;
+    let a_value = keycodes::from_name("A").unwrap().value;
+    let b_value = keycodes::from_name("B").unwrap().value;
+
+    press(&mut app, KeyCode::Enter);
+    type_text(&mut app, "key press");
+    press(&mut app, KeyCode::Enter);
+    type_text(&mut app, "b");
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Enter);
+    pump_until(&mut app, &mut rx, "the staged Vial edit", |app| {
+        app.editor
+            .as_ref()
+            .map(|editor| editor.keymap.layers[0].bindings[0].param1 == b_value)
+            .unwrap_or(false)
+    })
+    .await;
+
+    press(&mut app, KeyCode::Char('d'));
+    press(&mut app, KeyCode::Char('y'));
+    pump_until(&mut app, &mut rx, "the Vial discard", |app| {
+        app.busy.is_none()
+            && app
+                .editor
+                .as_ref()
+                .map(|editor| {
+                    editor.keymap.layers[0].bindings[0].param1 == a_value && !editor.dirty
+                })
+                .unwrap_or(false)
+    })
+    .await;
 }

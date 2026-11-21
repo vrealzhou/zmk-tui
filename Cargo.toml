@@ -17,13 +17,22 @@ bluest = "0.6.6"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
 futures = "0.3"
+hidapi = { version = "2", optional = true }
+lzma-rs = "0.3"
 prost = "0.14"
 ratatui = "0.29"
 serialport = "4"
+serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 unicode-width = "0.2"
 uuid = "1"
+
+[features]
+default = []
+# Real USB raw-HID transport for Vial keyboards. Off by default so the ZMK
+# Studio build stays free of USB HID dependencies.
+vial-hid = ["dep:hidapi"]
 
 [build-dependencies]
 prost-build = "0.14"
@@ -31,7 +40,6 @@ protoc-bin-vendored = "3"
 
 [dev-dependencies]
 cucumber = "0.21"
-serde_json = "1"
 tempfile = "3"
 
 # objc2 0.6.5's debug-only ObjC method verification mis-decodes

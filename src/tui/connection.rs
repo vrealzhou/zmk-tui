@@ -5,9 +5,13 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::client::{StudioClient, StudioError};
+use crate::device::DeviceClient;
 use crate::model::{Catalog, DeviceInfo, Keymap, LockState, PhysicalLayouts};
 use crate::transport::{Connection, ConnectionKind, ble, serial};
-use crate::tui::app::Msg;
+use crate::tui::app::{Msg, VialStart};
+use crate::vial::RawHid;
+use crate::vial::client::VialClient;
+use crate::vial::simulate::SimulatedVial;
 
 #[derive(Default)]
 pub struct Snapshot {
@@ -19,7 +23,7 @@ pub struct Snapshot {
 }
 
 pub struct Connected {
-    pub client: StudioClient,
+    pub client: DeviceClient,
     pub label: String,
     pub kind: ConnectionKind,
     pub info: DeviceInfo,
@@ -105,18 +109,20 @@ pub async fn finish_connection(
 ) -> Result<Connected, String> {
     let label = connection.label.clone();
     let kind = connection.kind;
-    let client = StudioClient::start(connection);
+    let client = DeviceClient::Studio(StudioClient::start(connection));
 
-    // Forward lock/unsaved/disconnect notifications to the UI.
-    let mut subscriptions = client.subscribe();
-    let event_sender = events.clone();
-    tokio::spawn(async move {
-        while let Ok(event) = subscriptions.recv().await {
-            if event_sender.send(Msg::DeviceEvent(event)).is_err() {
-                break;
+    // Forward lock/unsaved/disconnect notifications to the UI. Vial has no
+    // notification channel, so there is nothing to spawn for it.
+    if let Some(mut subscriptions) = client.subscribe() {
+        let event_sender = events.clone();
+        tokio::spawn(async move {
+            while let Ok(event) = subscriptions.recv().await {
+                if event_sender.send(Msg::DeviceEvent(event)).is_err() {
+                    break;
+                }
             }
-        }
-    });
+        });
+    }
 
     let info = client
         .get_device_info()
@@ -146,7 +152,52 @@ pub async fn finish_connection(
     })
 }
 
-pub async fn load_snapshot(client: &StudioClient) -> Result<Snapshot, StudioError> {
+/// Connect to a Vial keyboard, either the in-process demo or the first USB
+/// raw-HID interface. The handshake and keymap read happen before the UI
+/// switches to the editor, so protocol errors are shown on the connect screen.
+pub async fn connect_vial(start: VialStart) -> Result<Connected, String> {
+    let (transport, kind): (Box<dyn RawHid>, ConnectionKind) = match start {
+        VialStart::Simulate => (
+            Box::new(SimulatedVial::demo()),
+            ConnectionKind::VialSimulator,
+        ),
+        VialStart::Usb => {
+            #[cfg(feature = "vial-hid")]
+            {
+                let transport = crate::vial::transport::VialHid::open_first()
+                    .map_err(|error| error.to_string())?;
+                (Box::new(transport), ConnectionKind::Vial)
+            }
+            #[cfg(not(feature = "vial-hid"))]
+            {
+                return Err(
+                    "this build has no Vial USB transport; rebuild with --features vial-hid".into(),
+                );
+            }
+        }
+    };
+    let client = VialClient::open(transport)
+        .await
+        .map_err(|error| friendly(&error))?;
+    let device = DeviceClient::Vial(client);
+    let info = device
+        .get_device_info()
+        .await
+        .map_err(|error| friendly(&error))?;
+    let snapshot = load_snapshot(&device)
+        .await
+        .map_err(|error| friendly(&error))?;
+    Ok(Connected {
+        client: device,
+        label: format!("Vial · {}", info.name),
+        kind,
+        info,
+        lock: LockState::Unlocked,
+        snapshot: Some(snapshot),
+    })
+}
+
+pub async fn load_snapshot(client: &DeviceClient) -> Result<Snapshot, StudioError> {
     let keymap = client.get_keymap().await?;
     // Older/limited firmware may not implement physical layouts. Keep editing
     // available with the generic fallback grid instead of failing the whole

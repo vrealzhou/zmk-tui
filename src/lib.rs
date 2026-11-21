@@ -4,6 +4,7 @@
 //! ([`client`]), a UI layer ([`tui`]), and small domain modules shared by both.
 
 pub mod client;
+pub mod device;
 pub mod keycodes;
 pub mod labels;
 pub mod layout;
@@ -12,6 +13,7 @@ pub mod protocol;
 pub mod simulator;
 pub mod transport;
 pub mod tui;
+pub mod vial;
 
 #[cfg(kani)]
 mod verification;
