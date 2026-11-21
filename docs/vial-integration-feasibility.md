@@ -12,7 +12,7 @@
 | 能不能复用现在的 UI？ | **能，且已用模拟器验证。** 仍是同一个 `App`、同一套按键/弹窗/保存/丢弃/恢复流程；Vial 只是第二个设备后端。 |
 | 键位模型冲突大不大？ | **中等，但可控。** 用 14 个伪 behavior 把 QMK 16 位键码投影到现有 `Binding` 模型；无法结构化的键码一律保留原始值，读改写不会丢数据。 |
 | "Vial 不太稳定"是不是真的？ | **协议本身很稳；生态版本耦合才是风险。** Vial 固件和 GUI 对协议版本、QMK 键码编号有硬耦合；GUI 更新慢；只走 USB；宏/Tap Dance/Combos 等是另一套扩展。 |
-| 今天做到哪一步？ | 模拟器端到端可编辑、可保存、可丢弃、可恢复；连接页自动识别 Studio / Vial；只有一个候选时启动即自动连接；编辑器内按 `b` 可带未保存确认回到设备列表；94 个库测试 + 47 个 TUI 测试 + 13 个 Vial 集成测试通过。 |
+| 今天做到哪一步？ | 模拟器端到端可编辑、可保存、可丢弃、可恢复；连接页自动识别 Studio / Vial；只有一个候选时启动即自动连接；编辑器内按 `b` 可带未保存确认回到设备列表；102 个库测试 + 47 个 TUI 测试 + 13 个 Vial 集成测试通过，完整质量门通过。 |
 | 明天真机先做什么？ | 只读探测（版本/UID/矩阵/定义/层数）→ `.vil` 备份 → 改一个空闲键 → 读回校验 → 恢复。清单见 §9。 |
 
 **可行性评级：**
@@ -173,9 +173,10 @@ QMK 一个格子是一个 16 位键码；现有模型是 `{behavior_id, param1, 
 
 ### 6.4 测试/质量门冲突
 
-- 现有门禁要求 CRAP、覆盖率、变异测试、Kani。新增约 3.3k 行会拉低覆盖率、改变 CRAP 报告；`tools/quality-gate.sh` 本次**没有完整跑**（依赖 `cargo-llvm-cov`/`cargo-mutants`/Kani/lizard，且沙箱下 cargo 缓存需本地化）。
-- 已跑：`cargo test --all-targets`、`cargo clippy --all-targets -- -D warnings`、`cargo fmt`、`cargo check --all-targets`。
-- 合并前需要：把 Vial 模块纳入覆盖率统计，或按 `src/transport/**` 先例对 `src/vial/transport.rs` 做排除；给 `keycode.rs`/`protocol.rs` 补变异测试目标；确认 CRAP >30 为 0。
+- 现有门禁要求 CRAP、覆盖率、变异测试、Kani。新增约 3.3k 行会拉低覆盖率、改变 CRAP 报告，因此做了两类调整：
+  - 把 `src/vial/transport.rs`（hidapi FFI）和 `src/tui/connection.rs`（硬件连接分发）加入 CRAP 排除，和既有 `src/transport/**` 同一先例；行覆盖率仍然全量统计。
+  - 把 `tests/vial.rs` 加入门禁的集成测试步骤，并把变异测试的 target dir 隔离到 `target/quality/mutants-target`，避免 cargo-mutants 恢复源码后留下陈旧的变异产物。
+- `tools/quality-gate.sh` 已完整通过：覆盖率 **82.69%**（阈值 79%）、CRAP >30 **0**、CRAP >100 **0**、Kani 418 checks 通过、变异测试 19/20（95%，阈值 90%）。
 
 ## 7. "Vial 不稳定"到底指什么
 
@@ -226,7 +227,7 @@ TUI 模拟器路径（`--simulate-vial`）由 `tests/tui.rs` 覆盖：
 - 未保存时 `d` 丢弃，键位回到 `A`；
 - `L` 不打开层管理，提示 "fixed layer count"。
 
-当前测试统计：库 94、client 3、TUI 47、Vial 13、cucumber 4；`clippy -D warnings` 与 `fmt` 通过；默认构建即包含真实 Vial USB 传输。
+当前测试统计：库 102、client 3、TUI 47、Vial 13、cucumber 4；`clippy -D warnings` 与 `fmt` 通过；默认构建即包含真实 Vial USB 传输。
 
 ## 9. 明日真机验证清单
 
@@ -321,7 +322,7 @@ Raw 键码数量/样例：
 6. **保存原子性**：逐键写 + 读回校验；断线可能部分写入。
 7. **`.vil`**：只覆盖键位，不含宏/动态条目；只接受数字键码（本工具导出的格式）。
 8. **平台**：macOS 已编译验证；Linux/Windows 仅理论上 hidapi 可用，未测试。
-9. **质量门**：未跑完整 `tools/quality-gate.sh`；合并前需补覆盖率/CRAP/变异基线。
+9. **质量门**：完整 `tools/quality-gate.sh` 已通过（覆盖率、CRAP、Kani、变异）；但它验证的是主机协议/模拟器，不等于真机固件行为。
 10. **跨标准热切换**：`b` 可带未保存确认回到设备列表重新选择（含换标准），但没有不离开编辑器、原地热切换后端的快捷键。
 11. **自动连接只在单候选时发生**：多把键盘（或同一把键盘的两种接口同时可见）会停在连接页，避免猜错设备。
 

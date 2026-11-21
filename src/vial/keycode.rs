@@ -152,12 +152,8 @@ fn zmk_to_consumer(value: u32) -> Option<u8> {
 /// Translate a ZMK `&kp` parameter into a QMK basic keycode. Handles the plain
 /// keyboard page, the system keys and the consumer table.
 fn zmk_to_basic(value: u32) -> Option<u8> {
-    let mods = ((value >> 24) & 0xFF) as u8;
     let page = ((value >> 16) & 0xFF) as u8;
     let usage = (value & 0xFFFF) as u16;
-    if mods != 0 {
-        return None;
-    }
     match page {
         0 | keycodes::KEYBOARD_PAGE => {
             if (0x04..=0xA4).contains(&usage) || (0xE0..=0xE7).contains(&usage) {
@@ -351,6 +347,9 @@ impl Translator {
                 }
             }
             behavior::KP_MODS => {
+                if (binding.param2 >> 24) & 0xFF != 0 {
+                    return None;
+                }
                 let basic = zmk_to_basic(binding.param2)?;
                 let mods = (binding.param1 as u8) & 0x1F;
                 if mods == 0 {
@@ -589,6 +588,54 @@ mod tests {
         assert_eq!(translator.label(translator.decode(0x0004)), "A");
         assert_eq!(translator.label(translator.decode(0x0000)), "KC_NO");
         assert_eq!(translator.label(translator.decode(0x0211)), "LSFT(N)");
+    }
+
+    #[test]
+    fn modified_keys_keep_their_modifier_mask() {
+        let translator = translator(6);
+        for mods in [0u32, 1, 2, 4, 8, 0x10, 0x1F] {
+            let binding = Binding {
+                behavior_id: behavior::KP_MODS,
+                param1: mods,
+                param2: 0x0007_0004,
+            };
+            let encoded = translator.encode(binding).expect("encode");
+            assert_eq!(encoded & 0xFF, 0x04);
+            assert_eq!(u32::from(encoded >> 8) & 0x1F, mods);
+            assert_eq!(translator.encode(translator.decode(encoded)), Some(encoded));
+        }
+    }
+
+    #[test]
+    fn shifted_symbols_encode_as_qk_mods() {
+        let translator = translator(6);
+        // `!` is LSFT(1) in ZMK's keycode table: 0x02 07 001E.
+        let binding = Binding {
+            behavior_id: behavior::KP,
+            param1: 0x0207_001E,
+            param2: 0,
+        };
+        assert_eq!(translator.encode(binding), Some(0x021E));
+        assert_eq!(translator.encode(translator.decode(0x021E)), Some(0x021E));
+    }
+
+    #[test]
+    fn qmk_modifier_mask_conversion_covers_all_bits() {
+        for (zmk, qmk) in [
+            (0x00, 0x00),
+            (0x01, 0x01),
+            (0x02, 0x02),
+            (0x04, 0x04),
+            (0x08, 0x08),
+            (0x10, 0x11),
+            (0x20, 0x12),
+            (0x40, 0x14),
+            (0x80, 0x18),
+            (0x0F, 0x0F),
+            (0xF0, 0x1F),
+        ] {
+            assert_eq!(zmk_mods_to_qmk(zmk), qmk);
+        }
     }
 
     #[test]

@@ -130,3 +130,39 @@ fn map_error(error: VialError) -> StudioError {
         VialError::Locked => StudioError::UnlockRequired,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vial_errors_map_onto_the_ui_error_vocabulary() {
+        assert!(matches!(
+            map_error(VialError::Transport("x".into())),
+            StudioError::Transport(_)
+        ));
+        assert!(matches!(
+            map_error(VialError::Timeout),
+            StudioError::Timeout
+        ));
+        for error in [
+            VialError::UnsupportedProtocol { via: 9, vial: 7 },
+            VialError::Unexpected("x".into()),
+            VialError::Definition("x".into()),
+        ] {
+            assert!(matches!(map_error(error), StudioError::Protocol(_)));
+        }
+        assert!(matches!(
+            map_error(VialError::Keycode("x".into())),
+            StudioError::Device(_)
+        ));
+        assert!(matches!(
+            map_error(VialError::Unsupported("x")),
+            StudioError::RpcNotFound
+        ));
+        assert!(matches!(
+            map_error(VialError::Locked),
+            StudioError::UnlockRequired
+        ));
+    }
+}

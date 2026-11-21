@@ -2072,3 +2072,31 @@ fn move_list(state: &mut ListState, len: usize, delta: isize) {
     let next = (current + delta).clamp(0, len as isize - 1) as usize;
     state.select(Some(next));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::serial::UsbDevice;
+
+    #[tokio::test]
+    async fn auto_connect_dispatches_the_only_candidate() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            tx,
+            StartOptions {
+                auto_connect: true,
+                scan_vial: false,
+                ..Default::default()
+            },
+        );
+        app.connect.usb = vec![UsbEntry::Studio(UsbDevice {
+            path: "/dev/zmk-tui-test".into(),
+            product: Some("Test".into()),
+            manufacturer: None,
+            serial_number: None,
+        })];
+        assert!(app.try_auto_connect());
+        assert!(app.connect_inflight);
+        assert!(!app.auto_connect, "automatic connection is one-shot");
+    }
+}

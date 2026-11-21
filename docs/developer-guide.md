@@ -29,7 +29,7 @@ TUI (ratatui/crossterm)
 | `src/tui/` | App state machine, rendering, modals, keyboard grid, mouse hit map |
 | `src/simulator.rs` | In-process ZMK Studio device used by tests and `--simulate` |
 | `proto/zmk/` | Vendored ZMK Studio message schemas |
-| `tests/` | Client integration tests, TUI tests, Gherkin features and step definitions |
+| `tests/` | Client, TUI and Vial integration tests, Gherkin features and step definitions |
 | `tools/` | CRAP, mutation, screenshot and keycode-generation utilities |
 
 ## Protocol
@@ -244,13 +244,14 @@ cargo clippy --all-targets
 cargo fmt --check
 ```
 
-The suite contains 124 Rust unit/integration tests plus 4 Gherkin scenarios
+The suite contains Rust unit/integration tests plus 4 Gherkin scenarios
 (31 steps). Test targets:
 
 - library unit tests: framing, keycodes, labels, layout, modal state, mouse
   hit-testing, serial error handling;
 - `tests/client.rs`: in-process RPC client and simulator integration;
 - `tests/tui.rs`: complete `TestBackend` UI flows;
+- `tests/vial.rs`: Vial protocol, session, `.vil` and connect-list integration;
 - `tests/cucumber.rs`: Gherkin step definitions driving the real App;
 - `tests/features/`: binding edit/save, unsaved-change quit, layers/boards.
 
@@ -273,10 +274,13 @@ It runs, in order:
 
 1. `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`;
 2. unit tests (`--lib`, `--bins`);
-3. integration tests (`tests/client.rs`, `tests/tui.rs`, `tests/cucumber.rs`);
+3. integration tests (`tests/client.rs`, `tests/tui.rs`, `tests/cucumber.rs`,
+   `tests/vial.rs`);
 4. coverage + CRAP budgets:
-   - exclude `src/transport/**`, `src/main.rs`, `src/tui/mod.rs`,
-     `src/verification.rs` (Kani-only code is not part of runtime coverage);
+   - exclude `src/transport/**`, `src/vial/transport.rs`,
+     `src/tui/connection.rs`, `src/main.rs`, `src/tui/mod.rs`,
+     `src/verification.rs` (hardware/entry glue is not part of the CRAP gate;
+     line coverage is still measured);
    - CRAP > 30: **0**;
    - CRAP > 100: **0**;
    - line coverage: **≥ 79%**;

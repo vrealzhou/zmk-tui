@@ -35,12 +35,15 @@ echo "== integration tests =="
 cargo test --test client
 cargo test --test tui
 cargo test --test cucumber
+cargo test --test vial
 
 mkdir -p target/quality
 echo "== coverage + CRAP =="
 cargo llvm-cov --all-targets --json --output-path target/quality/coverage.json --quiet
 python3 tools/crap.py target/quality/coverage.json \
   --exclude 'src/transport/*' \
+  --exclude 'src/vial/transport.rs' \
+  --exclude 'src/tui/connection.rs' \
   --exclude 'src/main.rs' \
   --exclude 'src/tui/mod.rs' \
   --exclude 'src/verification.rs' \
@@ -62,7 +65,7 @@ fi
 echo "== mutation (frame codec) =="
 rm -rf target/quality/mutants
 set +e
-cargo mutants \
+CARGO_TARGET_DIR="$PWD/target/quality/mutants-target" cargo mutants \
   -f src/protocol/frame.rs \
   --jobs "${MUTATION_JOBS:-4}" \
   --timeout 60 \

@@ -364,6 +364,115 @@ mod tests {
     }
 
     #[test]
+    fn auxiliary_commands_and_getters_are_exercised() {
+        let mut simulator = SimulatedVial::demo()
+            .with_vial_protocol(5)
+            .with_unlocked(true)
+            .with_unlock_keys(&[(1, 2)]);
+        assert_eq!(
+            simulator.matrix(),
+            Matrix {
+                rows: DEMO_ROWS,
+                cols: DEMO_COLS
+            }
+        );
+        assert_eq!(simulator.layers(), DEMO_LAYERS);
+        assert_eq!(simulator.uid(), *b"VIALDEMO");
+        assert_eq!(simulator.uid_hex(), "5649414C44454D4F");
+        assert_eq!(simulator.serial(), "vial:f64c2b3c5649414C44454D4F");
+        assert_eq!(simulator.hid_descriptor(), (HID_USAGE_PAGE, HID_USAGE));
+        assert!(!simulator.definition_json().is_empty());
+
+        simulator.set_keycode(1, 2, 3, 0x1234);
+        assert_eq!(simulator.keycode(1, 2, 3), 0x1234);
+
+        let macro_count = simulator
+            .exchange(report(&[command::MACRO_GET_COUNT]))
+            .unwrap();
+        assert_eq!(macro_count[1], 16);
+        let macro_size = simulator
+            .exchange(report(&[command::MACRO_GET_BUFFER_SIZE]))
+            .unwrap();
+        assert_eq!(&macro_size[1..3], &[0, 0]);
+
+        let encoder = simulator
+            .exchange(report(&[command::VIAL, vial_command::GET_ENCODER]))
+            .unwrap();
+        assert_eq!(&encoder[..4], &[0, 0, 0, 0]);
+        simulator
+            .exchange(report(&[command::VIAL, vial_command::SET_ENCODER]))
+            .unwrap();
+        let unknown_vial = simulator.exchange(report(&[command::VIAL, 0x3F])).unwrap();
+        assert_eq!(unknown_vial[0], 0xFF);
+        let unknown = simulator.exchange(report(&[0x7F])).unwrap();
+        assert_eq!(unknown[0], 0xFF);
+
+        simulator
+            .exchange(report(&[command::VIAL, vial_command::LOCK]))
+            .unwrap();
+        assert!(!simulator.unlocked);
+    }
+
+    #[test]
+    fn invalid_cells_and_definition_pages_are_bounded() {
+        let mut simulator = SimulatedVial::demo();
+        let invalid = simulator
+            .exchange(report(&[command::DYNAMIC_KEYMAP_GET_KEYCODE, 99, 99, 99]))
+            .unwrap();
+        assert_eq!(&invalid[4..6], &[0, 0]);
+        simulator
+            .exchange(report(&[
+                command::DYNAMIC_KEYMAP_SET_KEYCODE,
+                99,
+                0,
+                0,
+                0,
+                4,
+            ]))
+            .unwrap();
+        assert!(simulator.writes.is_empty());
+
+        let beyond = simulator
+            .exchange(report(&[command::KEYMAP_GET_BUFFER, 0xFF, 0xFF, 4]))
+            .unwrap();
+        assert_eq!(&beyond[4..8], &[0, 0, 0, 0]);
+        let page = simulator
+            .exchange(report(&[
+                command::VIAL,
+                vial_command::GET_DEFINITION,
+                0xFF,
+                0xFF,
+            ]))
+            .unwrap();
+        assert_eq!(page, [0u8; REPORT_SIZE]);
+
+        simulator.fail_next("cable unplugged");
+        let error = simulator
+            .exchange(report(&[command::GET_LAYER_COUNT]))
+            .unwrap_err();
+        assert!(matches!(error, VialError::Transport(_)));
+    }
+
+    #[test]
+    fn releasing_unlock_keys_resets_the_hold_counter() {
+        let mut simulator = SimulatedVial::demo().with_unlock_keys(&[(0, 0)]);
+        simulator
+            .exchange(report(&[command::VIAL, vial_command::UNLOCK_START]))
+            .unwrap();
+        simulator.hold_keys(&[(0, 0)]);
+        let first = simulator
+            .exchange(report(&[command::VIAL, vial_command::UNLOCK_POLL]))
+            .unwrap();
+        assert_eq!(first[2], 2);
+        simulator.release_keys();
+        let reset = simulator
+            .exchange(report(&[command::VIAL, vial_command::UNLOCK_POLL]))
+            .unwrap();
+        assert_eq!(reset[2], 3);
+        assert!(!simulator.unlocked);
+    }
+
+    #[test]
     fn writes_are_audited() {
         let mut simulator = SimulatedVial::demo();
         simulator
