@@ -136,9 +136,9 @@ pub async fn connect(discovered: BleDevice) -> Result<Connection> {
     let adapter = Adapter::default()
         .await
         .context("Bluetooth is not available")?;
-    adapter
-        .wait_available()
+    tokio::time::timeout(ADAPTER_TIMEOUT, adapter.wait_available())
         .await
+        .map_err(|_| anyhow!("the Bluetooth adapter is unavailable (is Bluetooth turned on?)"))?
         .context("Bluetooth is not available")?;
     let device = adapter
         .open_device(&device_id)
@@ -163,6 +163,41 @@ pub async fn connect(discovered: BleDevice) -> Result<Connection> {
         Err(_) => return Err(anyhow!("timed out connecting to {name}")),
     }
 
+    let session = match establish_session(&device, &name).await {
+        Ok(session) => session,
+        Err(error) => {
+            // Leaving a half-set-up GATT session behind poisons the next
+            // connection attempt, so release the keyboard on every failure
+            // path after `connect_device`.
+            let _ =
+                tokio::time::timeout(Duration::from_secs(2), adapter.disconnect_device(&device))
+                    .await;
+            return Err(error);
+        }
+    };
+
+    Ok(Connection {
+        label: name,
+        kind: ConnectionKind::Bluetooth,
+        sink: Sink::Bluetooth(BleSink {
+            adapter,
+            device,
+            characteristic: session.characteristic,
+            chunk_size: session.chunk_size,
+            notify_task: session.notify_task,
+        }),
+        frames: session.frames,
+    })
+}
+
+struct Session {
+    characteristic: Characteristic,
+    chunk_size: usize,
+    frames: tokio::sync::mpsc::UnboundedReceiver<FrameResult>,
+    notify_task: tokio::task::JoinHandle<()>,
+}
+
+async fn establish_session(device: &Device, name: &str) -> Result<Session> {
     let service = device
         .discover_services_with_uuid(STUDIO_SERVICE_UUID)
         .await
@@ -217,13 +252,15 @@ pub async fn connect(discovered: BleDevice) -> Result<Connection> {
                 Ok(bytes) => {
                     debug(format!("rx {} bytes", bytes.len()));
                     completed.clear();
-                    if decoder.feed_slice(&bytes, &mut completed).is_err() {
-                        continue;
-                    }
+                    let result = decoder.feed_slice(&bytes, &mut completed);
+                    // Keep frames that completed before a corrupt byte run.
                     for frame in completed.drain(..) {
                         if frames_tx.send(Ok(frame)).is_err() {
                             return;
                         }
+                    }
+                    if result.is_err() {
+                        continue;
                     }
                 }
                 Err(error) => {
@@ -273,17 +310,11 @@ pub async fn connect(discovered: BleDevice) -> Result<Connection> {
         }
     }
 
-    Ok(Connection {
-        label: name,
-        kind: ConnectionKind::Bluetooth,
-        sink: Sink::Bluetooth(BleSink {
-            adapter,
-            device,
-            characteristic,
-            chunk_size,
-            notify_task,
-        }),
+    Ok(Session {
+        characteristic,
+        chunk_size,
         frames,
+        notify_task,
     })
 }
 

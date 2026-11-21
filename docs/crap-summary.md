@@ -7,9 +7,9 @@ in [`crap-baseline.md`](crap-baseline.md) and [`crap-report.md`](crap-report.md)
 
 | Metric | Baseline | After |
 | --- | ---: | ---: |
-| Functions analysed | 380 | 352 |
-| CRAP > 30 | 22 | 5 |
-| CRAP > 100 | 7 | 2 |
+| Functions analysed | 380 | 364 |
+| CRAP > 30 | 22 | 6 |
+| CRAP > 100 | 7 | 3 |
 
 ## Changes
 
@@ -33,6 +33,20 @@ cutoff), `generic_label` (132.00 → covered), and `param_items`
 (75.92 → refactored/covered). The gate-driven split also removed `handle`,
 `apply_action`, `handle_editor_key` and `LayerModal::handle_key` from the
 high-CRAP set.
+
+## Latest review pass
+
+A correctness review pass then split the three remaining core hot spots
+(`handle_edit_message`, `handle_layer_message` and the simulator's
+`handle_keymap`) into per-message/per-request helpers, and added regression
+tests for the review's fixes: firmware-faithful parameter validation, layer-name
+length limits, physical-layout refresh after discard, snapshot retry/staleness,
+narrow-terminal rendering and grid-based navigation. Line coverage is now
+**81.54%** with **0** excluded-set functions above CRAP 30.
+
+All three remaining whole-project CRAP > 100 rows are hardware/terminal glue
+(`establish_session`, `spawn_reader`, `spawn_input_thread`) and remain excluded
+from the gate, as do the rest of the transport and entry-point modules.
 
 ## Remaining high-CRAP functions
 

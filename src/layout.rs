@@ -40,14 +40,58 @@ impl Grid {
         self.cells.is_empty()
     }
 
-    /// Move the selection to the nearest key in `direction`.
+    /// Move the selection to the nearest key in `direction`, following the
+    /// rendered grid rather than the raw (staggered) key centres so that a move
+    /// between two keys drawn on the same row is rejected as "not up/down".
     pub fn move_selection(
         &self,
-        layout: &PhysicalLayout,
+        _layout: &PhysicalLayout,
         position: usize,
         direction: Direction,
     ) -> Option<usize> {
-        move_selection(layout, position, direction)
+        let current = self.cells.get(position)?;
+        if self.cells.is_empty() || self.unit_rows == 0 || self.unit_cols == 0 {
+            return None;
+        }
+        let (current_row, current_col) = self.row_column(current);
+        let mut best: Option<(i32, i32, usize)> = None;
+
+        for (index, cell) in self.cells.iter().enumerate() {
+            if index == position {
+                continue;
+            }
+            let (row, col) = self.row_column(cell);
+            let row_delta = row - current_row;
+            let col_delta = col - current_col;
+            let (primary, secondary) = match direction {
+                Direction::Left if col_delta < 0 => (-col_delta, row_delta.abs()),
+                Direction::Right if col_delta > 0 => (col_delta, row_delta.abs()),
+                Direction::Up if row_delta < 0 => (-row_delta, col_delta.abs()),
+                Direction::Down if row_delta > 0 => (row_delta, col_delta.abs()),
+                _ => continue,
+            };
+            // Nearest row/column first, then alignment with the current one.
+            let score = (primary, secondary);
+            if best.is_none_or(|(best_primary, best_secondary, _)| {
+                score < (best_primary, best_secondary)
+            }) {
+                best = Some((score.0, score.1, index));
+            }
+        }
+
+        best.map(|(_, _, index)| index)
+    }
+
+    /// Row and column index of a projected cell. Keys that share a rendered row
+    /// (or column) get the same index even when their physical positions
+    /// differ by column stagger.
+    fn row_column(&self, cell: &CellRect) -> (i32, i32) {
+        let center_x = i32::from(cell.x) + i32::from(cell.width) / 2;
+        let center_y = i32::from(cell.y) + i32::from(cell.height) / 2;
+        (
+            center_y.div_euclid(i32::from(self.unit_rows)),
+            center_x.div_euclid(i32::from(self.unit_cols)),
+        )
     }
 }
 
@@ -104,16 +148,20 @@ pub fn compute(layout: &PhysicalLayout, viewport: Viewport) -> Grid {
         return Grid::default();
     }
 
+    // Normalise signed origins so layouts with negative coordinates render
+    // from the top-left instead of piling every negative key onto cell zero.
+    let min_x = layout.keys.iter().map(|key| key.x).fold(0.0_f32, f32::min);
+    let min_y = layout.keys.iter().map(|key| key.y).fold(0.0_f32, f32::min);
     let bounds_width = layout
         .keys
         .iter()
-        .map(|key| key.x + key.width)
+        .map(|key| key.x - min_x + key.width)
         .fold(0.0_f32, f32::max)
         .max(1.0);
     let bounds_height = layout
         .keys
         .iter()
-        .map(|key| key.y + key.height)
+        .map(|key| key.y - min_y + key.height)
         .fold(0.0_f32, f32::max)
         .max(1.0);
 
@@ -126,7 +174,7 @@ pub fn compute(layout: &PhysicalLayout, viewport: Viewport) -> Grid {
     let mut max_x = 0;
     let mut max_y = 0;
     for key in &layout.keys {
-        let rect = project(key, unit_cols, unit_rows);
+        let rect = project(key, min_x, min_y, unit_cols, unit_rows);
         max_x = max_x.max(rect.x + rect.width);
         max_y = max_y.max(rect.y + rect.height);
         cells.push(rect);
@@ -141,9 +189,9 @@ pub fn compute(layout: &PhysicalLayout, viewport: Viewport) -> Grid {
     }
 }
 
-fn project(key: &KeyGeometry, unit_cols: u16, unit_rows: u16) -> CellRect {
-    let x = (key.x * unit_cols as f32).round() as u16;
-    let y = (key.y * unit_rows as f32).round() as u16;
+fn project(key: &KeyGeometry, min_x: f32, min_y: f32, unit_cols: u16, unit_rows: u16) -> CellRect {
+    let x = ((key.x - min_x) * unit_cols as f32).round() as u16;
+    let y = ((key.y - min_y) * unit_rows as f32).round() as u16;
     let full_width = (key.width * unit_cols as f32).round().max(1.0) as u16;
     let full_height = (key.height * unit_rows as f32).round().max(1.0) as u16;
     CellRect {
@@ -280,6 +328,60 @@ mod tests {
         assert_eq!(position_at(&grid, 10, 0), Some(1));
         assert_eq!(position_at(&grid, 9, 0), None); // gap between keys
         assert_eq!(position_at(&grid, 500, 0), None);
+    }
+
+    #[test]
+    fn negative_origins_are_normalised_into_the_grid() {
+        let layout = PhysicalLayout {
+            name: "negative".into(),
+            keys: vec![
+                key(-2.0, 0.0, 1.0, 1.0),
+                key(-1.0, 0.0, 1.0, 1.0),
+                key(0.0, 0.0, 1.0, 1.0),
+            ],
+        };
+        let grid = compute(
+            &layout,
+            Viewport {
+                width: 60,
+                height: 10,
+            },
+        );
+        let cells: Vec<CellRect> = (0..3).map(|i| grid.cell(i).unwrap()).collect();
+        assert_eq!(cells[0].x, 0, "the leftmost key starts at column zero");
+        assert!(cells[0].x < cells[1].x);
+        assert!(cells[1].x < cells[2].x);
+        assert_eq!(position_at(&grid, 0, 0), Some(0));
+    }
+
+    #[test]
+    fn grid_navigation_ignores_column_stagger() {
+        // Two keys drawn on the same rendered row but with 0.12u of stagger.
+        let layout = PhysicalLayout {
+            name: "stagger".into(),
+            keys: vec![
+                key(0.0, 0.12, 1.0, 1.0),
+                key(1.0, 0.0, 1.0, 1.0),
+                key(0.0, 1.12, 1.0, 1.0),
+            ],
+        };
+        let grid = compute(
+            &layout,
+            Viewport {
+                width: 40,
+                height: 20,
+            },
+        );
+        assert_eq!(
+            grid.move_selection(&layout, 0, Direction::Up),
+            None,
+            "the staggered neighbour is on the same rendered row"
+        );
+        assert_eq!(
+            grid.move_selection(&layout, 2, Direction::Up),
+            Some(0),
+            "a real row above keeps the same column"
+        );
     }
 
     #[test]

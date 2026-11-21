@@ -24,6 +24,12 @@ pub fn fit(text: &str, max: usize) -> String {
         out.push(ch);
         used += ch_width;
     }
+    // Combining sequences (for example an emoji followed by U+FE0F) measure
+    // wider than the sum of their individual characters; trim until the
+    // contract "never wider than max" holds.
+    while width(&out) > max {
+        out.pop();
+    }
     out
 }
 
@@ -82,6 +88,22 @@ mod tests {
         assert_eq!(fit("A", 3), "A");
         assert_eq!(fit("ＦＵＬＬ", 3), "Ｆ");
         assert_eq!(fit("abc", 0), "");
+    }
+
+    #[test]
+    fn fit_never_exceeds_the_column_budget_for_combining_sequences() {
+        // U+2600 followed by the emoji variation selector measures two columns
+        // as a sequence but only one column per code point.
+        let sun = "\u{2600}\u{FE0F}";
+        let fitted = fit(sun, 1);
+        assert!(width(&fitted) <= 1, "fitted width {}", width(&fitted));
+        let ellipsized = ellipsize(&format!("{sun}x"), 2);
+        assert!(
+            width(&ellipsized) <= 2,
+            "ellipsized width {}",
+            width(&ellipsized)
+        );
+        assert!(width(&center(sun, 1)) <= 1);
     }
 
     #[test]

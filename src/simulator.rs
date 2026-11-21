@@ -63,6 +63,9 @@ const BEH_OUTPUT: u32 = 1012;
 const KEYBOARD_MAX: u32 = 0xE7;
 const CONSUMER_MAX: u32 = 0x29D;
 const MAX_LAYERS: usize = 8;
+/// Mirrors `CONFIG_ZMK_KEYMAP_LAYER_NAME_MAX_LEN`: the buffer size. The longest
+/// valid name is one byte shorter.
+const MAX_LAYER_NAME_LENGTH: usize = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SimCommand {
@@ -257,6 +260,7 @@ struct DeviceState {
     saved_layers: Vec<SimLayer>,
     unsaved: bool,
     active_layout: usize,
+    saved_active_layout: usize,
     layouts: Vec<PhysicalLayout>,
     key_count: usize,
 }
@@ -732,6 +736,7 @@ impl DeviceState {
             layers,
             unsaved: false,
             active_layout: 0,
+            saved_active_layout: 0,
             layouts,
             key_count,
         }
@@ -749,7 +754,7 @@ impl DeviceState {
                 })
                 .collect(),
             available_layers: MAX_LAYERS.saturating_sub(self.layers.len()) as u32,
-            max_layer_name_length: 32,
+            max_layer_name_length: MAX_LAYER_NAME_LENGTH as u32,
         }
     }
 
@@ -765,13 +770,13 @@ impl DeviceState {
                         .keys
                         .iter()
                         .map(|key| zmk::keymap::KeyPhysicalAttrs {
-                            width: (key.width * 100.0) as i32,
-                            height: (key.height * 100.0) as i32,
-                            x: (key.x * 100.0) as i32,
-                            y: (key.y * 100.0) as i32,
-                            r: (key.rotation * 100.0) as i32,
-                            rx: (key.rotation_x * 100.0) as i32,
-                            ry: (key.rotation_y * 100.0) as i32,
+                            width: centi(key.width),
+                            height: centi(key.height),
+                            x: centi(key.x),
+                            y: centi(key.y),
+                            r: centi(key.rotation),
+                            rx: centi(key.rotation_x),
+                            ry: centi(key.rotation_y),
                         })
                         .collect(),
                 })
@@ -845,11 +850,84 @@ impl DeviceState {
     }
 }
 
+/// Key units to the centi-units the wire format uses.
+fn centi(value: f32) -> i32 {
+    (value * 100.0).round() as i32
+}
+
 fn param_set(
     param1: Vec<zmk::behaviors::BehaviorParameterValueDescription>,
     param2: Vec<zmk::behaviors::BehaviorParameterValueDescription>,
 ) -> zmk::behaviors::BehaviorBindingParametersSet {
     zmk::behaviors::BehaviorBindingParametersSet { param1, param2 }
+}
+
+/// Mirror the firmware's `zmk_behavior_check_params_match_metadata`: a binding
+/// is valid when at least one advertised parameter signature accepts both
+/// parameter values.
+fn params_match(
+    sets: &[zmk::behaviors::BehaviorBindingParametersSet],
+    param1: u32,
+    param2: u32,
+) -> bool {
+    if sets.is_empty() {
+        return param1 == 0 && param2 == 0;
+    }
+    sets.iter()
+        .any(|set| param_matches(&set.param1, param1) && param_matches(&set.param2, param2))
+}
+
+fn param_matches(descs: &[zmk::behaviors::BehaviorParameterValueDescription], param: u32) -> bool {
+    if descs.is_empty() {
+        return param == 0;
+    }
+    descs.iter().any(|desc| param_matches_desc(desc, param))
+}
+
+fn param_matches_desc(
+    desc: &zmk::behaviors::BehaviorParameterValueDescription,
+    param: u32,
+) -> bool {
+    use zmk::behaviors::behavior_parameter_value_description::ValueType;
+
+    match &desc.value_type {
+        Some(ValueType::Nil(_)) => param == 0,
+        Some(ValueType::Constant(value)) => param == *value,
+        Some(ValueType::Range(range)) => {
+            i64::from(param) >= i64::from(range.min) && i64::from(param) <= i64::from(range.max)
+        }
+        Some(ValueType::HidUsage(usage)) => {
+            hid_usage_is_valid(param, usage.keyboard_max, usage.consumer_max)
+        }
+        Some(ValueType::LayerId(_)) => param < MAX_LAYERS as u32,
+        None => false,
+    }
+}
+
+/// Mirror the firmware's `validate_hid_usage`.
+fn hid_usage_is_valid(value: u32, keyboard_max: u32, consumer_max: u32) -> bool {
+    const KEYBOARD_PAGE: u32 = 0x07;
+    const CONSUMER_PAGE: u32 = 0x0C;
+    const MODIFIER_MIN: u32 = 0xE0;
+    const MODIFIER_MAX: u32 = 0xE7;
+
+    let page = (value >> 16) & 0xFF;
+    let usage = value & 0xFFFF;
+    match page {
+        KEYBOARD_PAGE => {
+            if usage == 0 {
+                return false;
+            }
+            let limit = if keyboard_max == 0 {
+                MODIFIER_MAX
+            } else {
+                keyboard_max
+            };
+            usage <= limit || (MODIFIER_MIN..=MODIFIER_MAX).contains(&usage)
+        }
+        CONSUMER_PAGE => consumer_max == 0 || usage <= consumer_max,
+        _ => false,
+    }
 }
 
 fn hid_usage_param(name: &str) -> zmk::behaviors::BehaviorParameterValueDescription {
@@ -933,7 +1011,9 @@ async fn run(
             bytes = outgoing.recv() => {
                 let Some(bytes) = bytes else { return; };
                 frames.clear();
-                if decoder.feed_slice(&bytes, &mut frames).is_err() {
+                let result = decoder.feed_slice(&bytes, &mut frames);
+                // Dispatch frames that completed before a corrupt byte run.
+                if result.is_err() && frames.is_empty() {
                     continue;
                 }
                 for frame in frames.drain(..) {
@@ -941,6 +1021,7 @@ async fn run(
                         continue;
                     };
                     let request_id = request.request_id;
+                    let was_unsaved = device.unsaved;
                     let mut response = handle_request(&mut device, request);
                     response.request_id = request_id;
                     let payload = zmk::studio::Response {
@@ -949,6 +1030,14 @@ async fn run(
                     .encode_to_vec();
                     if incoming.send(Ok(payload)).is_err() {
                         return;
+                    }
+                    // The firmware raises an unsaved-changes notification after
+                    // every mutation that changes the dirty state.
+                    if device.unsaved != was_unsaved {
+                        send_notification(
+                            &incoming,
+                            keymap_unsaved_notification(device.unsaved),
+                        );
                     }
                 }
             }
@@ -977,6 +1066,20 @@ fn core_lock_notification(locked: bool) -> zmk::studio::Notification {
                     } else {
                         1
                     }),
+                ),
+            },
+        )),
+    }
+}
+
+fn keymap_unsaved_notification(unsaved: bool) -> zmk::studio::Notification {
+    zmk::studio::Notification {
+        subsystem: Some(zmk::studio::notification::Subsystem::Keymap(
+            zmk::keymap::Notification {
+                notification_type: Some(
+                    zmk::keymap::notification::NotificationType::UnsavedChangesStatusChanged(
+                        unsaved,
+                    ),
                 ),
             },
         )),
@@ -1028,7 +1131,8 @@ fn handle_request(
             Some(zmk::core::request::RequestType::ResetSettings(_)) => {
                 device.layers = device.stock_layers.clone();
                 device.saved_layers = device.stock_layers.clone();
-                device.active_layout = 0;
+                // The firmware's settings reset covers keymap storage only; the
+                // physical-layout selection is a separate setting.
                 device.unsaved = false;
                 core_response(zmk::core::response::ResponseType::ResetSettings(true))
             }
@@ -1061,199 +1165,255 @@ fn handle_keymap(
     request: zmk::keymap::Request,
 ) -> zmk::studio::RequestResponse {
     use zmk::keymap::request::RequestType;
+    use zmk::keymap::response::ResponseType;
 
     match request.request_type {
-        Some(RequestType::GetKeymap(_)) => keymap_response(
-            zmk::keymap::response::ResponseType::GetKeymap(device.keymap()),
-        ),
-        Some(RequestType::GetPhysicalLayouts(_)) => keymap_response(
-            zmk::keymap::response::ResponseType::GetPhysicalLayouts(device.physical_layouts()),
-        ),
+        Some(RequestType::GetKeymap(_)) => {
+            keymap_response(ResponseType::GetKeymap(device.keymap()))
+        }
+        Some(RequestType::GetPhysicalLayouts(_)) => {
+            keymap_response(ResponseType::GetPhysicalLayouts(device.physical_layouts()))
+        }
         Some(RequestType::CheckUnsavedChanges(_)) => keymap_response(
-            zmk::keymap::response::ResponseType::CheckUnsavedChanges(device.unsaved),
+            // The firmware counts an unsaved keymap and an unsaved physical
+            // layout selection as one dirty state.
+            ResponseType::CheckUnsavedChanges(
+                device.unsaved || device.active_layout != device.saved_active_layout,
+            ),
         ),
-        Some(RequestType::SetLayerBinding(set)) => {
-            let Some(layer_index) = device
-                .layers
-                .iter()
-                .position(|layer| layer.id == set.layer_id)
-            else {
-                return keymap_response(zmk::keymap::response::ResponseType::SetLayerBinding(
-                    zmk::keymap::SetLayerBindingResponse::SetLayerBindingRespInvalidLocation as i32,
-                ));
-            };
-            let Some(binding) = set.binding else {
-                return keymap_response(zmk::keymap::response::ResponseType::SetLayerBinding(
-                    zmk::keymap::SetLayerBindingResponse::SetLayerBindingRespInvalidParameters
-                        as i32,
-                ));
-            };
-            let position = set.key_position.max(0) as usize;
-            if position >= device.layers[layer_index].bindings.len() {
-                return keymap_response(zmk::keymap::response::ResponseType::SetLayerBinding(
-                    zmk::keymap::SetLayerBindingResponse::SetLayerBindingRespInvalidLocation as i32,
-                ));
-            }
-            if device
-                .behavior_details(binding.behavior_id.max(0) as u32)
-                .is_none()
-            {
-                return keymap_response(zmk::keymap::response::ResponseType::SetLayerBinding(
-                    zmk::keymap::SetLayerBindingResponse::SetLayerBindingRespInvalidBehavior as i32,
-                ));
-            }
-            device.layers[layer_index].bindings[position] = binding;
-            device.unsaved = true;
-            keymap_response(zmk::keymap::response::ResponseType::SetLayerBinding(
-                zmk::keymap::SetLayerBindingResponse::SetLayerBindingRespOk as i32,
-            ))
+        Some(RequestType::SetLayerBinding(set)) => set_layer_binding(device, set),
+        Some(RequestType::SaveChanges(_)) => save_changes(device),
+        Some(RequestType::DiscardChanges(_)) => discard_changes(device),
+        Some(RequestType::AddLayer(_)) => add_layer(device),
+        Some(RequestType::RemoveLayer(remove)) => remove_layer(device, remove.layer_index),
+        Some(RequestType::MoveLayer(request)) => {
+            move_layer(device, request.start_index, request.dest_index)
         }
-        Some(RequestType::SaveChanges(_)) => {
-            device.saved_layers = device.layers.clone();
-            device.unsaved = false;
-            keymap_response(zmk::keymap::response::ResponseType::SaveChanges(
-                zmk::keymap::SaveChangesResponse {
-                    result: Some(zmk::keymap::save_changes_response::Result::Ok(true)),
-                },
-            ))
-        }
-        Some(RequestType::DiscardChanges(_)) => {
-            device.layers = device.saved_layers.clone();
-            device.unsaved = false;
-            keymap_response(zmk::keymap::response::ResponseType::DiscardChanges(true))
-        }
-        Some(RequestType::AddLayer(_)) => {
-            if device.layers.len() >= MAX_LAYERS {
-                return keymap_response(zmk::keymap::response::ResponseType::AddLayer(
-                    zmk::keymap::AddLayerResponse {
-                        result: Some(zmk::keymap::add_layer_response::Result::Err(
-                            zmk::keymap::AddLayerErrorCode::AddLayerErrNoSpace as i32,
-                        )),
-                    },
-                ));
-            }
-            let id = device
-                .layers
-                .iter()
-                .map(|layer| layer.id)
-                .max()
-                .unwrap_or(0)
-                + 1;
-            let index = device.layers.len() as u32;
-            device.layers.push(SimLayer {
-                id,
-                name: String::new(),
-                bindings: vec![trans(); device.key_count],
-            });
-            device.unsaved = true;
-            keymap_response(zmk::keymap::response::ResponseType::AddLayer(
-                zmk::keymap::AddLayerResponse {
-                    result: Some(zmk::keymap::add_layer_response::Result::Ok(
-                        zmk::keymap::AddLayerResponseDetails {
-                            index,
-                            layer: Some(zmk::keymap::Layer {
-                                id,
-                                name: String::new(),
-                                bindings: vec![trans(); device.key_count],
-                            }),
-                        },
-                    )),
-                },
-            ))
-        }
-        Some(RequestType::RemoveLayer(remove)) => {
-            let index = remove.layer_index as usize;
-            if index >= device.layers.len() || device.layers.len() <= 1 {
-                return keymap_response(zmk::keymap::response::ResponseType::RemoveLayer(
-                    zmk::keymap::RemoveLayerResponse {
-                        result: Some(zmk::keymap::remove_layer_response::Result::Err(
-                            zmk::keymap::RemoveLayerErrorCode::RemoveLayerErrInvalidIndex as i32,
-                        )),
-                    },
-                ));
-            }
-            device.layers.remove(index);
-            device.unsaved = true;
-            keymap_response(zmk::keymap::response::ResponseType::RemoveLayer(
-                zmk::keymap::RemoveLayerResponse {
-                    result: Some(zmk::keymap::remove_layer_response::Result::Ok(
-                        zmk::keymap::RemoveLayerOk {},
-                    )),
-                },
-            ))
-        }
-        Some(RequestType::MoveLayer(move_layer)) => {
-            let start = move_layer.start_index as usize;
-            let dest = move_layer.dest_index as usize;
-            if start >= device.layers.len() || dest >= device.layers.len() {
-                return keymap_response(zmk::keymap::response::ResponseType::MoveLayer(
-                    zmk::keymap::MoveLayerResponse {
-                        result: Some(zmk::keymap::move_layer_response::Result::Err(
-                            zmk::keymap::MoveLayerErrorCode::MoveLayerErrInvalidLayer as i32,
-                        )),
-                    },
-                ));
-            }
-            let layer = device.layers.remove(start);
-            device.layers.insert(dest, layer);
-            device.unsaved = true;
-            keymap_response(zmk::keymap::response::ResponseType::MoveLayer(
-                zmk::keymap::MoveLayerResponse {
-                    result: Some(zmk::keymap::move_layer_response::Result::Ok(
-                        device.keymap(),
-                    )),
-                },
-            ))
-        }
-        Some(RequestType::SetLayerProps(props)) => {
-            match device
-                .layers
-                .iter_mut()
-                .find(|layer| layer.id == props.layer_id)
-            {
-                Some(layer) => {
-                    layer.name = props.name;
-                    device.unsaved = true;
-                    keymap_response(zmk::keymap::response::ResponseType::SetLayerProps(
-                        zmk::keymap::SetLayerPropsResponse::SetLayerPropsRespOk as i32,
-                    ))
-                }
-                None => keymap_response(zmk::keymap::response::ResponseType::SetLayerProps(
-                    zmk::keymap::SetLayerPropsResponse::SetLayerPropsRespErrInvalidId as i32,
-                )),
-            }
-        }
+        Some(RequestType::SetLayerProps(props)) => set_layer_props(device, props),
         Some(RequestType::SetActivePhysicalLayout(index)) => {
-            if (index as usize) < device.layouts.len() {
-                device.active_layout = index as usize;
-                device.unsaved = true;
-                keymap_response(
-                    zmk::keymap::response::ResponseType::SetActivePhysicalLayout(
-                        zmk::keymap::SetActivePhysicalLayoutResponse {
-                            result: Some(
-                                zmk::keymap::set_active_physical_layout_response::Result::Ok(
-                                    device.keymap(),
-                                ),
-                            ),
-                        },
-                    ),
-                )
-            } else {
-                keymap_response(
-                    zmk::keymap::response::ResponseType::SetActivePhysicalLayout(
-                        zmk::keymap::SetActivePhysicalLayoutResponse {
-                            result: Some(
-                                zmk::keymap::set_active_physical_layout_response::Result::Err(
-                                    zmk::keymap::SetActivePhysicalLayoutErrorCode::SetActivePhysicalLayoutErrInvalidLayoutIndex as i32,
-                                ),
-                            ),
-                        },
-                    ),
-                )
-            }
+            set_active_physical_layout(device, index)
         }
         Some(RequestType::RestoreLayer(_)) | None => no_response(),
     }
+}
+
+fn set_layer_binding_response(
+    code: zmk::keymap::SetLayerBindingResponse,
+) -> zmk::studio::RequestResponse {
+    keymap_response(zmk::keymap::response::ResponseType::SetLayerBinding(
+        code as i32,
+    ))
+}
+
+fn set_layer_binding(
+    device: &mut DeviceState,
+    set: zmk::keymap::SetLayerBindingRequest,
+) -> zmk::studio::RequestResponse {
+    use zmk::keymap::SetLayerBindingResponse as Code;
+
+    let Some(layer_index) = device
+        .layers
+        .iter()
+        .position(|layer| layer.id == set.layer_id)
+    else {
+        return set_layer_binding_response(Code::SetLayerBindingRespInvalidLocation);
+    };
+    let Some(binding) = set.binding else {
+        return set_layer_binding_response(Code::SetLayerBindingRespInvalidParameters);
+    };
+    if set.key_position < 0 {
+        return set_layer_binding_response(Code::SetLayerBindingRespInvalidLocation);
+    }
+    let position = set.key_position as usize;
+    if position >= device.layers[layer_index].bindings.len() {
+        return set_layer_binding_response(Code::SetLayerBindingRespInvalidLocation);
+    }
+    let Ok(behavior_id) = u32::try_from(binding.behavior_id) else {
+        return set_layer_binding_response(Code::SetLayerBindingRespInvalidBehavior);
+    };
+    let Some(details) = device.behavior_details(behavior_id) else {
+        return set_layer_binding_response(Code::SetLayerBindingRespInvalidBehavior);
+    };
+    // The firmware validates the parameters against the behavior metadata.
+    if !params_match(&details.metadata, binding.param1, binding.param2) {
+        return set_layer_binding_response(Code::SetLayerBindingRespInvalidParameters);
+    }
+    device.layers[layer_index].bindings[position] = binding;
+    device.unsaved = true;
+    set_layer_binding_response(Code::SetLayerBindingRespOk)
+}
+
+fn save_changes(device: &mut DeviceState) -> zmk::studio::RequestResponse {
+    device.saved_layers = device.layers.clone();
+    device.saved_active_layout = device.active_layout;
+    device.unsaved = false;
+    keymap_response(zmk::keymap::response::ResponseType::SaveChanges(
+        zmk::keymap::SaveChangesResponse {
+            result: Some(zmk::keymap::save_changes_response::Result::Ok(true)),
+        },
+    ))
+}
+
+fn discard_changes(device: &mut DeviceState) -> zmk::studio::RequestResponse {
+    // The firmware reverts the keymap to the last saved state and re-selects
+    // the stock (default) physical layout.
+    device.layers = device.saved_layers.clone();
+    device.active_layout = 0;
+    device.unsaved = false;
+    keymap_response(zmk::keymap::response::ResponseType::DiscardChanges(true))
+}
+
+fn add_layer(device: &mut DeviceState) -> zmk::studio::RequestResponse {
+    use zmk::keymap::response::ResponseType;
+
+    if device.layers.len() >= MAX_LAYERS {
+        return keymap_response(ResponseType::AddLayer(zmk::keymap::AddLayerResponse {
+            result: Some(zmk::keymap::add_layer_response::Result::Err(
+                zmk::keymap::AddLayerErrorCode::AddLayerErrNoSpace as i32,
+            )),
+        }));
+    }
+    // Reuse the lowest free layer id, like the firmware's layer slots.
+    let id = (0..MAX_LAYERS as u32)
+        .find(|candidate| device.layers.iter().all(|layer| layer.id != *candidate))
+        .unwrap_or(device.layers.len() as u32);
+    let index = device.layers.len() as u32;
+    let layer = SimLayer {
+        id,
+        name: String::new(),
+        bindings: vec![trans(); device.key_count],
+    };
+    device.layers.push(layer);
+    device.unsaved = true;
+    keymap_response(ResponseType::AddLayer(zmk::keymap::AddLayerResponse {
+        result: Some(zmk::keymap::add_layer_response::Result::Ok(
+            zmk::keymap::AddLayerResponseDetails {
+                index,
+                layer: Some(zmk::keymap::Layer {
+                    id,
+                    name: String::new(),
+                    bindings: vec![trans(); device.key_count],
+                }),
+            },
+        )),
+    }))
+}
+
+fn remove_layer(device: &mut DeviceState, layer_index: u32) -> zmk::studio::RequestResponse {
+    use zmk::keymap::response::ResponseType;
+
+    let index = layer_index as usize;
+    if index >= device.layers.len() || device.layers.len() <= 1 {
+        return keymap_response(ResponseType::RemoveLayer(
+            zmk::keymap::RemoveLayerResponse {
+                result: Some(zmk::keymap::remove_layer_response::Result::Err(
+                    zmk::keymap::RemoveLayerErrorCode::RemoveLayerErrInvalidIndex as i32,
+                )),
+            },
+        ));
+    }
+    device.layers.remove(index);
+    device.unsaved = true;
+    keymap_response(ResponseType::RemoveLayer(
+        zmk::keymap::RemoveLayerResponse {
+            result: Some(zmk::keymap::remove_layer_response::Result::Ok(
+                zmk::keymap::RemoveLayerOk {},
+            )),
+        },
+    ))
+}
+
+fn move_layer(
+    device: &mut DeviceState,
+    start_index: u32,
+    dest_index: u32,
+) -> zmk::studio::RequestResponse {
+    use zmk::keymap::response::ResponseType;
+
+    let start = start_index as usize;
+    let dest = dest_index as usize;
+    if start >= device.layers.len() || dest >= device.layers.len() {
+        return keymap_response(ResponseType::MoveLayer(zmk::keymap::MoveLayerResponse {
+            result: Some(zmk::keymap::move_layer_response::Result::Err(
+                zmk::keymap::MoveLayerErrorCode::MoveLayerErrInvalidLayer as i32,
+            )),
+        }));
+    }
+    let layer = device.layers.remove(start);
+    device.layers.insert(dest, layer);
+    device.unsaved = true;
+    keymap_response(ResponseType::MoveLayer(zmk::keymap::MoveLayerResponse {
+        result: Some(zmk::keymap::move_layer_response::Result::Ok(
+            device.keymap(),
+        )),
+    }))
+}
+
+fn set_layer_props(
+    device: &mut DeviceState,
+    props: zmk::keymap::SetLayerPropsRequest,
+) -> zmk::studio::RequestResponse {
+    use zmk::keymap::SetLayerPropsResponse as Code;
+    use zmk::keymap::response::ResponseType;
+
+    let Some(layer) = device
+        .layers
+        .iter_mut()
+        .find(|layer| layer.id == props.layer_id)
+    else {
+        return keymap_response(ResponseType::SetLayerProps(
+            Code::SetLayerPropsRespErrInvalidId as i32,
+        ));
+    };
+    // The firmware treats an empty name as a no-op success.
+    if props.name.is_empty() {
+        return keymap_response(ResponseType::SetLayerProps(
+            Code::SetLayerPropsRespOk as i32,
+        ));
+    }
+    // `max_layer_name_length` is the storage buffer size and
+    // `zmk_keymap_set_layer_name` rejects names of that length.
+    if props.name.len() >= MAX_LAYER_NAME_LENGTH {
+        return keymap_response(ResponseType::SetLayerProps(
+            Code::SetLayerPropsRespErrGeneric as i32,
+        ));
+    }
+    layer.name = props.name;
+    device.unsaved = true;
+    keymap_response(ResponseType::SetLayerProps(
+        Code::SetLayerPropsRespOk as i32,
+    ))
+}
+
+fn set_active_physical_layout(
+    device: &mut DeviceState,
+    index: u32,
+) -> zmk::studio::RequestResponse {
+    use zmk::keymap::SetActivePhysicalLayoutErrorCode as Error;
+    use zmk::keymap::response::ResponseType;
+    use zmk::keymap::set_active_physical_layout_response::Result as Outcome;
+
+    let index = index as usize;
+    if index >= device.layouts.len() {
+        return keymap_response(ResponseType::SetActivePhysicalLayout(
+            zmk::keymap::SetActivePhysicalLayoutResponse {
+                result: Some(Outcome::Err(
+                    Error::SetActivePhysicalLayoutErrInvalidLayoutIndex as i32,
+                )),
+            },
+        ));
+    }
+    // Selecting the already-active layout is a no-op that does not create an
+    // unsaved change.
+    if index != device.active_layout {
+        device.active_layout = index;
+        device.unsaved = true;
+    }
+    keymap_response(ResponseType::SetActivePhysicalLayout(
+        zmk::keymap::SetActivePhysicalLayoutResponse {
+            result: Some(Outcome::Ok(device.keymap())),
+        },
+    ))
 }
 
 fn core_response(response_type: zmk::core::response::ResponseType) -> zmk::studio::RequestResponse {

@@ -13,17 +13,22 @@ use tokio::sync::mpsc::{self, UnboundedReceiver};
 
 use zmk_tui::client::{StudioError, StudioEvent};
 use zmk_tui::keycodes;
-use zmk_tui::model::LockState;
+use zmk_tui::model::{Binding, LockState};
 use zmk_tui::simulator::SimulatedBoard;
 use zmk_tui::transport::serial::UsbDevice;
 use zmk_tui::tui::StartOptions;
 use zmk_tui::tui::app::{App, Msg, Panel, StatusKind};
+use zmk_tui::tui::connection::Snapshot;
 use zmk_tui::tui::modals::{Modal, Stage, UnlockModal, behavior_items};
 use zmk_tui::tui::mouse::{ListKind, MouseTarget};
 use zmk_tui::tui::render;
 
 fn screen_text(app: &mut App) -> String {
-    let backend = TestBackend::new(120, 35);
+    screen_text_sized(app, 120, 35)
+}
+
+fn screen_text_sized(app: &mut App, width: u16, height: u16) -> String {
+    let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("test terminal");
     terminal
         .draw(|frame| render::render(frame, app))
@@ -877,4 +882,309 @@ fn usb_device_messages_clamp_connect_selection() {
 
     app.handle(Msg::UsbDevices(Vec::new()));
     assert_eq!(app.connect.usb_state.selected(), None);
+}
+
+#[tokio::test]
+async fn discard_resyncs_the_physical_layout() {
+    let (mut app, mut rx) = connected_app().await;
+
+    press(&mut app, KeyCode::Char('p'));
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Enter);
+    pump_until(&mut app, &mut rx, "the layout switch", |app| {
+        app.editor
+            .as_ref()
+            .map(|editor| editor.layouts.active_index == 1 && app.busy.is_none())
+            .unwrap_or(false)
+    })
+    .await;
+    assert!(app.editor.as_ref().unwrap().dirty);
+
+    press(&mut app, KeyCode::Char('d'));
+    press(&mut app, KeyCode::Char('y'));
+    pump_until(&mut app, &mut rx, "the discard", |app| {
+        app.editor
+            .as_ref()
+            .map(|editor| editor.layouts.active_index == 0 && app.busy.is_none())
+            .unwrap_or(false)
+    })
+    .await;
+    assert!(!app.editor.as_ref().unwrap().dirty);
+}
+
+#[tokio::test]
+async fn selecting_the_active_layout_is_not_an_edit() {
+    let (mut app, mut rx) = connected_app().await;
+
+    press(&mut app, KeyCode::Char('p'));
+    // The picker starts on the active layout; Enter re-selects it.
+    press(&mut app, KeyCode::Enter);
+    pump_until(&mut app, &mut rx, "the no-op layout selection", |app| {
+        app.busy.is_none() && app.modal.is_none()
+    })
+    .await;
+    assert!(
+        !app.editor.as_ref().unwrap().dirty,
+        "re-selecting the current layout must not mark the keymap dirty"
+    );
+}
+
+#[tokio::test]
+async fn late_completions_do_not_close_other_modals() {
+    let (mut app, _rx) = connected_app().await;
+    let a = keycodes::from_name("A").unwrap().value;
+
+    press(&mut app, KeyCode::Char('?'));
+    assert!(matches!(app.modal, Some(Modal::Help)));
+
+    app.handle(Msg::BindingSet {
+        result: Ok(()),
+        layer_id: 0,
+        position: 0,
+        binding: Binding {
+            behavior_id: 1001,
+            param1: a,
+            param2: 0,
+        },
+    });
+    assert!(
+        matches!(app.modal, Some(Modal::Help)),
+        "an in-flight binding update must not dismiss an unrelated dialog"
+    );
+
+    app.handle(Msg::LayoutChanged {
+        result: Ok(app.editor.as_ref().unwrap().keymap.clone()),
+        index: 1,
+    });
+    assert!(matches!(app.modal, Some(Modal::Help)));
+}
+
+#[tokio::test]
+async fn layer_add_is_blocked_when_slots_are_full() {
+    let (mut app, _rx) = connected_app().await;
+    app.editor.as_mut().unwrap().keymap.available_layers = 0;
+
+    press(&mut app, KeyCode::Char('L'));
+    assert!(matches!(app.modal, Some(Modal::Layers(_))));
+    press(&mut app, KeyCode::Char('a'));
+    assert!(
+        matches!(app.modal, Some(Modal::Layers(_))),
+        "the manager stays open and explains why the layer cannot be added"
+    );
+    assert_eq!(
+        app.status.as_ref().map(|status| status.kind),
+        Some(StatusKind::Warning)
+    );
+    assert!(app.busy.is_none());
+}
+
+#[tokio::test]
+async fn stale_snapshots_do_not_overwrite_newer_edits() {
+    let (mut app, mut rx) = connected_app().await;
+    let a_value = keycodes::from_name("A").unwrap().value;
+    let before_edit = app.editor.as_ref().unwrap().keymap.clone();
+
+    // Apply an edit through the wizard, which records a mutation.
+    press(&mut app, KeyCode::Enter);
+    type_text(&mut app, "key press");
+    press(&mut app, KeyCode::Enter);
+    type_text(&mut app, "a");
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Enter);
+    pump_until(&mut app, &mut rx, "the binding update", |app| {
+        app.editor
+            .as_ref()
+            .map(|editor| editor.keymap.layers[0].bindings[0].param1 == a_value)
+            .unwrap_or(false)
+    })
+    .await;
+
+    let editor = app.editor.as_ref().unwrap();
+    let mut layouts = editor.layouts.clone();
+    layouts.active_index = 1;
+    let snapshot = Snapshot {
+        keymap: before_edit,
+        layouts,
+        catalog: editor.catalog.clone(),
+        dirty: false,
+        warnings: vec![],
+    };
+    app.handle(Msg::Snapshot(Ok(snapshot)));
+
+    let editor = app.editor.as_ref().unwrap();
+    assert_eq!(
+        editor.keymap.layers[0].bindings[0].param1, a_value,
+        "the stale snapshot must not revert the newer edit"
+    );
+    assert!(editor.dirty, "the newer edit is still unsaved");
+    assert_eq!(
+        editor.layouts.active_index, 1,
+        "layout data from the snapshot is still applied"
+    );
+}
+
+#[tokio::test]
+async fn failed_keymap_load_is_retried() {
+    let (mut app, mut rx) = connected_app().await;
+    app.editor.as_mut().unwrap().keymap_loaded = false;
+
+    app.handle(Msg::Snapshot(Err(StudioError::Timeout)));
+    assert!(app.busy.is_none());
+
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    app.handle(Msg::Tick);
+    assert!(
+        app.busy.is_some(),
+        "a failed load must be retried automatically"
+    );
+
+    pump_until(&mut app, &mut rx, "the retried keymap load", |app| {
+        app.editor
+            .as_ref()
+            .map(|editor| editor.keymap_loaded && app.busy.is_none())
+            .unwrap_or(false)
+    })
+    .await;
+}
+
+/// Every visible key rectangle must hit its own key, unless it overlaps another
+/// key rectangle (overlapping projections are legitimate on rotated boards).
+fn assert_editor_key_targets_are_consistent(app: &mut App) {
+    let count = app.editor.as_ref().unwrap().position_count();
+    let rects: Vec<(usize, ratatui::layout::Rect)> = (0..count)
+        .filter_map(|position| {
+            app.mouse
+                .target_rect(MouseTarget::EditorKey(position))
+                .map(|rect| (position, rect))
+        })
+        .collect();
+    for (position, rect) in &rects {
+        let overlaps = rects.iter().any(|(other, candidate)| {
+            other != position
+                && candidate.x < rect.x + rect.width
+                && candidate.x + candidate.width > rect.x
+                && candidate.y < rect.y + rect.height
+                && candidate.y + candidate.height > rect.y
+        });
+        if overlaps {
+            continue;
+        }
+        let target = app
+            .mouse
+            .hit(rect.x + rect.width / 2, rect.y + rect.height / 2);
+        assert_eq!(
+            target,
+            Some(MouseTarget::EditorKey(*position)),
+            "key {position} at {rect:?} is covered by another target"
+        );
+    }
+}
+
+#[tokio::test]
+async fn scrolled_keymap_clips_offscreen_keys() {
+    let (mut app, _rx) = connected_app_for(SimulatedBoard::Sofle).await;
+    screen_text_sized(&mut app, 46, 12);
+
+    // Scroll to the last thumb key, which forces the grid to scroll down.
+    press(&mut app, KeyCode::End);
+    screen_text_sized(&mut app, 46, 12);
+    assert_editor_key_targets_are_consistent(&mut app);
+
+    // The top row is scrolled out of view, so its keys must be clipped rather
+    // than clamped onto the top visible row (where they would be drawn over and
+    // steal clicks from the keys that actually belong there).
+    assert!(
+        app.mouse.target_rect(MouseTarget::EditorKey(2)).is_none(),
+        "a fully scrolled-out key must not be rendered"
+    );
+}
+
+#[tokio::test]
+async fn layer_tabs_keep_the_active_layer_clickable_when_narrow() {
+    let (mut app, _rx) = connected_app().await;
+    // Add enough layers to overflow the tab bar at the minimum terminal width.
+    let base = app.editor.as_ref().unwrap().keymap.layers[0].clone();
+    {
+        let editor = app.editor.as_mut().unwrap();
+        for index in 0..3 {
+            let mut layer = base.clone();
+            layer.id = 100 + index;
+            layer.name = format!("Extra{index}");
+            editor.keymap.layers.push(layer);
+        }
+        editor.layer_index = editor.keymap.layers.len() - 1;
+    }
+    screen_text_sized(&mut app, 46, 12);
+
+    let active = 7;
+    let rect = app
+        .mouse
+        .target_rect(MouseTarget::LayerTab(active))
+        .unwrap_or_else(|| panic!("active layer tab {active} must be visible"));
+    assert!(rect.width > 0);
+    assert_eq!(
+        app.mouse.hit(rect.x + rect.width / 2, rect.y),
+        Some(MouseTarget::LayerTab(active))
+    );
+}
+
+#[tokio::test]
+async fn confirm_choices_stay_clickable_on_a_narrow_terminal() {
+    let (mut app, _rx) = connected_app().await;
+    app.editor.as_mut().unwrap().dirty = true;
+    press(&mut app, KeyCode::Char('q'));
+    assert!(matches!(app.modal, Some(Modal::Confirm(_))));
+    screen_text_sized(&mut app, 46, 12);
+
+    for index in 0..3 {
+        let rect = app
+            .mouse
+            .target_rect(MouseTarget::ConfirmChoice(index))
+            .unwrap_or_else(|| panic!("choice {index} must be clickable"));
+        assert_eq!(
+            app.mouse.hit(rect.x + rect.width / 2, rect.y),
+            Some(MouseTarget::ConfirmChoice(index))
+        );
+    }
+}
+
+#[tokio::test]
+async fn binding_review_apply_target_covers_only_the_button() {
+    let (mut app, _rx) = connected_app().await;
+    press(&mut app, KeyCode::Enter);
+    type_text(&mut app, "transparent");
+    press(&mut app, KeyCode::Enter);
+    screen_text(&mut app);
+    let rect = app
+        .mouse
+        .target_rect(MouseTarget::BindingApply)
+        .expect("apply target");
+    assert!(
+        rect.width <= 10,
+        "only the [ Apply ] label should be clickable, got {rect:?}"
+    );
+}
+
+#[tokio::test]
+async fn vertical_navigation_follows_rendered_rows() {
+    let (mut app, _rx) = connected_app_for(SimulatedBoard::Sofle).await;
+    screen_text(&mut app);
+
+    press(&mut app, KeyCode::Home);
+    press(&mut app, KeyCode::Right);
+    press(&mut app, KeyCode::Right);
+    assert_eq!(app.editor.as_ref().unwrap().selected, 2);
+
+    // Sofle staggers the first column down by 0.37u; position 0 is nonetheless
+    // on the same rendered row as position 2, so Up must not move there.
+    press(&mut app, KeyCode::Up);
+    assert_eq!(app.editor.as_ref().unwrap().selected, 2);
+
+    press(&mut app, KeyCode::Home);
+    press(&mut app, KeyCode::Down);
+    assert_eq!(
+        app.editor.as_ref().unwrap().selected,
+        12,
+        "Down keeps the same column on the next row"
+    );
 }

@@ -2,7 +2,8 @@
 //! serial port (usually shown as `/dev/cu.usbmodem…` on macOS).
 
 use std::io::{self, Read, Write};
-use std::sync::mpsc as std_mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc as std_mpsc};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -77,14 +78,18 @@ pub fn connect(path: &str) -> Result<Connection> {
 
     let (frames_tx, frames) = tokio::sync::mpsc::unbounded_channel::<FrameResult>();
     let (write_tx, write_rx) = std_mpsc::channel::<Vec<u8>>();
+    let shutdown = Arc::new(AtomicBool::new(false));
 
-    spawn_reader(reader_port, frames_tx.clone());
+    spawn_reader(reader_port, frames_tx.clone(), shutdown.clone());
     spawn_writer(port, write_rx, frames_tx);
 
     Ok(Connection {
         label: path.to_string(),
         kind: ConnectionKind::Usb,
-        sink: Sink::Serial(SerialSink { writer: write_tx }),
+        sink: Sink::Serial(SerialSink {
+            writer: write_tx,
+            shutdown,
+        }),
         frames,
     })
 }
@@ -92,6 +97,7 @@ pub fn connect(path: &str) -> Result<Connection> {
 fn spawn_reader(
     mut port: Box<dyn SerialPort>,
     frames_tx: tokio::sync::mpsc::UnboundedSender<FrameResult>,
+    shutdown: Arc<AtomicBool>,
 ) {
     std::thread::Builder::new()
         .name("zmk-usb-read".into())
@@ -101,21 +107,26 @@ fn spawn_reader(
             let mut completed = Vec::new();
 
             loop {
-                if frames_tx.is_closed() {
+                // The shutdown flag is set when the client is dropped, so the
+                // port is released even if the peer never sends another byte.
+                if shutdown.load(Ordering::Relaxed) || frames_tx.is_closed() {
                     break;
                 }
                 match port.read(&mut buffer) {
                     Ok(0) => std::thread::sleep(Duration::from_millis(10)),
                     Ok(n) => {
                         completed.clear();
-                        if decoder.feed_slice(&buffer[..n], &mut completed).is_err() {
-                            // Corrupt stream: the decoder has resynchronised.
-                            continue;
-                        }
+                        let result = decoder.feed_slice(&buffer[..n], &mut completed);
+                        // Frames that completed before a corrupt byte run are
+                        // still valid and must not be dropped.
                         for frame in completed.drain(..) {
                             if frames_tx.send(Ok(frame)).is_err() {
                                 return;
                             }
+                        }
+                        if result.is_err() {
+                            // Corrupt stream: the decoder has resynchronised.
+                            continue;
                         }
                     }
                     Err(error) if is_timeout(&error) => continue,
@@ -156,6 +167,14 @@ fn is_timeout(error: &io::Error) -> bool {
 
 pub struct SerialSink {
     writer: std_mpsc::Sender<Vec<u8>>,
+    /// Signals the reader thread to stop and release the serial port.
+    shutdown: Arc<AtomicBool>,
+}
+
+impl Drop for SerialSink {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+    }
 }
 
 impl SerialSink {

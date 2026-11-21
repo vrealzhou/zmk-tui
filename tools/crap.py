@@ -60,6 +60,7 @@ GLUE_NOTES = {
     ("src/transport/ble.rs", "adapter"): "BLE adapter creation",
     ("src/transport/ble.rs", "scan"): "BLE scan",
     ("src/transport/ble.rs", "connect"): "BLE/CoreBluetooth connection",
+    ("src/transport/ble.rs", "establish_session"): "BLE GATT session setup",
     ("src/transport/ble.rs", "drop"): "GATT teardown hook",
     ("src/transport/ble.rs", "send"): "BLE characteristic write",
     ("src/transport/serial.rs", "list_usb_devices"): "OS serial enumeration",

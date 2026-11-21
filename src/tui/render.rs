@@ -65,6 +65,21 @@ fn render_too_small(frame: &mut Frame, area: Rect) {
 // --------------------------------------------------------------------------
 
 fn render_editor(frame: &mut Frame, area: Rect, app: &mut App, hits: &mut MouseMap) {
+    let chunks = Layout::vertical([
+        Constraint::Length(1), // header
+        Constraint::Length(1), // layers
+        Constraint::Min(5),    // keyboard
+        Constraint::Length(2), // selection detail
+        Constraint::Length(1), // footer
+    ])
+    .split(area);
+    // Remember the keyboard viewport so directional navigation can use the same
+    // projection the keymap is drawn with.
+    app.keyboard_viewport = crate::layout::Viewport {
+        width: chunks[2].width.saturating_sub(2),
+        height: chunks[2].height.saturating_sub(2),
+    };
+
     let App {
         editor,
         status,
@@ -75,15 +90,6 @@ fn render_editor(frame: &mut Frame, area: Rect, app: &mut App, hits: &mut MouseM
     let Some(editor) = editor.as_ref() else {
         return;
     };
-
-    let chunks = Layout::vertical([
-        Constraint::Length(1), // header
-        Constraint::Length(1), // layers
-        Constraint::Min(5),    // keyboard
-        Constraint::Length(2), // selection detail
-        Constraint::Length(1), // footer
-    ])
-    .split(area);
 
     render_editor_header(frame, chunks[0], editor);
     render_layer_tabs(frame, chunks[1], editor, hits);
@@ -164,22 +170,41 @@ fn render_layer_tabs(frame: &mut Frame, area: Rect, editor: &EditorState, hits: 
     }
 
     let active = editor.layer_index.min(layers.len() - 1);
-    let window = 7usize;
-    let start = active
-        .saturating_sub(window / 2)
-        .min(layers.len().saturating_sub(window));
-    let end = (start + window).min(layers.len());
+    let prefix = " Layers ";
+    let prefix_width = text::width(prefix) as u16;
+    let labels: Vec<String> = layers
+        .iter()
+        .enumerate()
+        .map(|(index, layer)| format!(" {index} {} ", text::ellipsize(&layer.label(index), 12)))
+        .collect();
+    let widths: Vec<u16> = labels
+        .iter()
+        .map(|label| text::width(label) as u16 + 1)
+        .collect();
 
-    let mut spans = vec![Span::styled(" Layers ", theme::title())];
-    let mut x = area.x.saturating_add(text::width(" Layers ") as u16);
+    // Fit as many tabs as the terminal allows, keeping the active layer
+    // visible. Two columns are reserved for each scroll indicator.
+    let budget = area.width.saturating_sub(prefix_width.saturating_add(4));
+    let mut start = active;
+    let mut used = widths[active].min(budget);
+    while start > 0 && used.saturating_add(widths[start - 1]) <= budget {
+        start -= 1;
+        used = used.saturating_add(widths[start]);
+    }
+    let mut end = active + 1;
+    while end < layers.len() && used.saturating_add(widths[end]) <= budget {
+        used = used.saturating_add(widths[end]);
+        end += 1;
+    }
+
+    let mut spans = vec![Span::styled(prefix, theme::title())];
+    let mut x = area.x.saturating_add(prefix_width);
     if start > 0 {
         spans.push(Span::styled("‹ ", theme::dim()));
         x = x.saturating_add(2);
     }
-    for (index, layer) in layers.iter().enumerate().skip(start).take(end - start) {
-        let name = text::ellipsize(&layer.label(index), 12);
-        let label = format!(" {index} {name} ");
-        let width = text::width(&label) as u16;
+    for (index, label) in labels.iter().enumerate().take(end).skip(start) {
+        let width = text::width(label) as u16;
         let remaining = area.right().saturating_sub(x);
         if remaining > 0 {
             hits.add(
@@ -193,10 +218,10 @@ fn render_layer_tabs(frame: &mut Frame, area: Rect, editor: &EditorState, hits: 
             );
         }
         if index == active {
-            spans.push(Span::styled(label, theme::selected()));
+            spans.push(Span::styled(label.clone(), theme::selected()));
         } else {
             spans.push(Span::styled(
-                label,
+                label.clone(),
                 Style::default().fg(theme::TEXT_DIM).bg(theme::PANEL),
             ));
         }
@@ -266,7 +291,7 @@ fn render_detail(frame: &mut Frame, area: Rect, editor: &EditorState) {
         .unwrap_or("unknown behavior");
     let layer_name = editor.layer_name();
 
-    let first = Line::from(vec![
+    let head = vec![
         Span::styled(" › ", Style::default().fg(theme::ACCENT)),
         Span::styled(
             format!("pos {:<2}", editor.selected),
@@ -280,11 +305,20 @@ fn render_detail(frame: &mut Frame, area: Rect, editor: &EditorState) {
             Style::default().fg(theme::ACCENT_ALT),
         ),
         Span::styled("  ·  ", theme::dim()),
-        Span::styled(
-            text::ellipsize(&label.detail, area.width.saturating_sub(44) as usize),
-            Style::default().fg(theme::TEXT),
+    ];
+    let head_width: usize = head
+        .iter()
+        .map(|span| text::width(span.content.as_ref()))
+        .sum();
+    let mut first_spans = head;
+    first_spans.push(Span::styled(
+        text::ellipsize(
+            &label.detail,
+            (area.width as usize).saturating_sub(head_width),
         ),
-    ]);
+        Style::default().fg(theme::TEXT),
+    ));
+    let first = Line::from(first_spans);
 
     let second = if editor.locked {
         Line::from(Span::styled(
@@ -303,15 +337,16 @@ fn render_detail(frame: &mut Frame, area: Rect, editor: &EditorState) {
             }
             _ => format!("behavior: {behavior_name}"),
         };
+        let header = format!("     {} ", text::fit_padded(&label.header, 6));
+        let header_width = text::width(&header);
+        let main_span = Span::styled(label.main.clone(), Style::default().fg(theme::TEXT));
+        let used = header_width + text::width(&label.main) + 3;
         Line::from(vec![
-            Span::styled(
-                format!("     {:<6} ", label.header),
-                Style::default().fg(theme::ACCENT_ALT),
-            ),
-            Span::styled(label.main, Style::default().fg(theme::TEXT)),
+            Span::styled(header, Style::default().fg(theme::ACCENT_ALT)),
+            main_span,
             Span::styled("   ", theme::dim()),
             Span::styled(
-                text::ellipsize(&extra, area.width.saturating_sub(24) as usize),
+                text::ellipsize(&extra, (area.width as usize).saturating_sub(used)),
                 theme::dim(),
             ),
         ])
@@ -435,10 +470,13 @@ fn render_connect(frame: &mut Frame, area: Rect, app: &mut App, hits: &mut Mouse
         ..
     } = app;
 
+    // Keep the footer and at least a few rows of panels visible on a short
+    // terminal; the informational panel shrinks first.
+    let requirements_height = area.height.saturating_sub(3 + 1 + 4).min(6);
     let chunks = Layout::vertical([
         Constraint::Length(3),
-        Constraint::Min(8),
-        Constraint::Length(6),
+        Constraint::Min(4),
+        Constraint::Length(requirements_height),
         Constraint::Length(1),
     ])
     .split(area);
@@ -633,19 +671,18 @@ fn render_bluetooth_panel(
             .bluetooth
             .iter()
             .map(|device| {
+                let status = if device.connected {
+                    "  connected"
+                } else {
+                    "  advertising"
+                };
+                let budget = (parts[0].width as usize).saturating_sub(4 + text::width(status));
                 ListItem::new(Line::from(vec![
                     Span::styled(
-                        text::ellipsize(&device.name, parts[0].width.saturating_sub(4) as usize),
+                        text::ellipsize(&device.name, budget),
                         Style::default().fg(theme::TEXT),
                     ),
-                    Span::styled(
-                        if device.connected {
-                            "  connected"
-                        } else {
-                            "  advertising"
-                        },
-                        theme::dim(),
-                    ),
+                    Span::styled(status, theme::dim()),
                 ]))
             })
             .collect();
@@ -720,11 +757,29 @@ fn render_requirements(frame: &mut Frame, area: Rect) {
             ),
         ]),
     ];
+    // Only show the lines that fit, ellipsized to the panel width, instead of
+    // silently clipping wrapped text on a short terminal.
+    let inner_height = block.inner(area).height as usize;
+    let inner_width = block.inner(area).width as usize;
+    let visible: Vec<Line> = text
+        .into_iter()
+        .take(inner_height)
+        .map(|line| {
+            let mut spans = Vec::new();
+            let mut used = 0usize;
+            for span in line.spans {
+                let content = text::ellipsize(&span.content, inner_width.saturating_sub(used));
+                used += text::width(&content);
+                spans.push(Span::styled(content, span.style));
+                if used >= inner_width {
+                    break;
+                }
+            }
+            Line::from(spans)
+        })
+        .collect();
     frame.render_widget(
-        Paragraph::new(text)
-            .block(block)
-            .wrap(Wrap { trim: true })
-            .style(theme::panel()),
+        Paragraph::new(visible).block(block).style(theme::panel()),
         area,
     );
 }
@@ -808,7 +863,12 @@ fn render_binding_modal(
     let rect = modal_rect(area, width, height);
     frame.render_widget(Clear, rect);
 
-    let layer_name = editor.layer_name();
+    // Resolve the layer from the ID the wizard captured, so a layer reorder
+    // while the wizard is open cannot mislabel the target.
+    let layer_name = editor
+        .keymap
+        .layer_label_by_id(wizard.layer_id)
+        .unwrap_or_else(|| format!("#{}", wizard.layer_id));
     let title = Line::from(vec![
         Span::styled(" Edit binding ", theme::title()),
         Span::styled(
@@ -1105,10 +1165,19 @@ fn render_binding_modal(
                 theme::dim(),
             )));
             frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), chunks[4]);
-            hits.add(chunks[5], MouseTarget::BindingApply);
+            let apply_label = "[ Apply ]";
+            hits.add(
+                Rect {
+                    x: chunks[5].x,
+                    y: chunks[5].y,
+                    width: (text::width(apply_label) as u16).min(chunks[5].width),
+                    height: 1,
+                },
+                MouseTarget::BindingApply,
+            );
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled("[ Apply ]", theme::selected()),
+                    Span::styled(apply_label, theme::selected()),
                     Span::styled("  ·  Esc back", theme::dim()),
                 ])),
                 chunks[5],
@@ -1223,6 +1292,9 @@ fn render_layer_modal(
         .enumerate()
         .map(|(index, layer)| {
             let active = index == editor.layer_index;
+            let suffix = format!("   id {} · {} keys", layer.id, layer.bindings.len());
+            // highlight symbol + marker + index + suffix
+            let budget = (parts[0].width as usize).saturating_sub(2 + 2 + 4 + text::width(&suffix));
             ListItem::new(Line::from(vec![
                 Span::styled(
                     if active { "● " } else { "  " },
@@ -1230,20 +1302,14 @@ fn render_layer_modal(
                 ),
                 Span::styled(format!("{index:>2}  "), theme::dim()),
                 Span::styled(
-                    text::ellipsize(
-                        &layer.label(index),
-                        parts[0].width.saturating_sub(24) as usize,
-                    ),
+                    text::ellipsize(&layer.label(index), budget),
                     Style::default().fg(theme::TEXT).add_modifier(if active {
                         Modifier::BOLD
                     } else {
                         Modifier::empty()
                     }),
                 ),
-                Span::styled(
-                    format!("   id {} · {} keys", layer.id, layer.bindings.len()),
-                    theme::dim(),
-                ),
+                Span::styled(suffix, theme::dim()),
             ]))
         })
         .collect();
@@ -1309,13 +1375,19 @@ fn render_layout_modal(
         .enumerate()
         .map(|(index, layout)| {
             let active = index == editor.layouts.active_index;
+            let suffix = format!("   {} keys", layout.keys.len());
+            // highlight symbol + marker + suffix
+            let budget = (parts[0].width as usize).saturating_sub(2 + 2 + text::width(&suffix));
             ListItem::new(Line::from(vec![
                 Span::styled(
                     if active { "● " } else { "  " },
                     Style::default().fg(theme::ACCENT),
                 ),
-                Span::styled(layout.name.clone(), Style::default().fg(theme::TEXT)),
-                Span::styled(format!("   {} keys", layout.keys.len()), theme::dim()),
+                Span::styled(
+                    text::ellipsize(&layout.name, budget),
+                    Style::default().fg(theme::TEXT),
+                ),
+                Span::styled(suffix, theme::dim()),
             ]))
         })
         .collect();
@@ -1342,13 +1414,17 @@ fn render_layout_modal(
 fn render_confirm(frame: &mut Frame, area: Rect, confirm: &ConfirmModal, hits: &mut MouseMap) {
     let width = area.width.saturating_sub(10).clamp(36, 68);
     let message_lines = confirm.message.lines().count().max(1) as u16;
-    let height = (message_lines + 7).clamp(9, 16);
+    let choice_rows = confirm.choices.len() as u16;
+    let height = (message_lines + choice_rows + 5)
+        .clamp(9, 20)
+        .min(area.height.saturating_sub(2));
     let rect = modal_rect(area, width, height);
     frame.render_widget(Clear, rect);
     let block = modal_block(Span::styled(format!(" {} ", confirm.title), theme::title()));
     let inner = inset(block.inner(rect));
     frame.render_widget(block, rect);
-    let parts = Layout::vertical([Constraint::Min(2), Constraint::Length(2)]).split(inner);
+    let parts =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(choice_rows)]).split(inner);
 
     frame.render_widget(
         Paragraph::new(confirm.message.clone())
@@ -1357,38 +1433,40 @@ fn render_confirm(frame: &mut Frame, area: Rect, confirm: &ConfirmModal, hits: &
         parts[0],
     );
 
-    let mut spans = Vec::new();
-    let mut x = parts[1].x;
+    // One choice per row, so every choice stays visible and clickable even in
+    // a narrow terminal where a single line would wrap.
     for (index, choice) in confirm.choices.iter().enumerate() {
+        let row = Rect {
+            y: parts[1].y.saturating_add(index as u16),
+            height: 1,
+            ..parts[1]
+        };
+        if row.y >= inner.bottom() {
+            break;
+        }
         let key = format!(" [{}] ", choice.key.to_uppercase());
         let label = choice.label.clone();
-        let width = (text::width(&key) + text::width(&label) + 2) as u16;
-        let remaining = parts[1].right().saturating_sub(x);
-        if remaining > 0 {
+        let width = (text::width(&key) + text::width(&label)) as u16;
+        if width > 0 {
             hits.add(
                 Rect {
-                    x,
-                    y: parts[1].y,
-                    width: width.min(remaining),
-                    height: 1,
+                    width: width.min(parts[1].width),
+                    ..row
                 },
                 MouseTarget::ConfirmChoice(index),
             );
         }
-        spans.push(Span::styled(
-            key,
-            Style::default()
-                .fg(theme::ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(label, Style::default().fg(theme::TEXT)));
-        spans.push(Span::raw("  "));
-        x = x.saturating_add(width);
+        let line = Line::from(vec![
+            Span::styled(
+                key,
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(label, Style::default().fg(theme::TEXT)),
+        ]);
+        frame.render_widget(Paragraph::new(line), row);
     }
-    frame.render_widget(
-        Paragraph::new(Line::from(spans)).wrap(Wrap { trim: false }),
-        parts[1],
-    );
 }
 
 fn render_unlock(
@@ -1400,12 +1478,14 @@ fn render_unlock(
     hits: &mut MouseMap,
 ) {
     let width = area.width.saturating_sub(12).clamp(40, 76);
-    let height = 13.min(area.height);
+    let height = 14.min(area.height.saturating_sub(2));
     let rect = modal_rect(area, width, height);
     frame.render_widget(Clear, rect);
     let block = modal_block(Span::styled(" Unlock ZMK Studio ", theme::title()));
     let inner = inset(block.inner(rect));
     frame.render_widget(block, rect);
+    // Pin the action row so it stays visible however the instructions wrap.
+    let parts = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
 
     let mut lines = vec![
         Line::from(Span::styled("🔒", Style::default().fg(theme::DANGER))),
@@ -1422,7 +1502,7 @@ fn render_unlock(
             Style::default().fg(theme::TEXT),
         )),
         Line::from(Span::styled(
-            "ZMK Studio editing is disabled until the keyboard is unlocked.",
+            "Editing is disabled until the keyboard is unlocked.",
             theme::dim(),
         )),
         Line::from(""),
@@ -1434,17 +1514,33 @@ fn render_unlock(
         )));
     } else {
         lines.push(Line::from(Span::styled(
-            "The app checks automatically · Esc to dismiss",
+            "Esc dismisses this dialog",
             theme::dim(),
         )));
     }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
+    frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        parts[0],
+    );
+
+    let action = Line::from(Span::styled(
         "u / Enter  check now",
         Style::default().fg(theme::ACCENT),
-    )));
-    hits.add(inner, MouseTarget::UnlockCheck);
-    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
+    ));
+    hits.add(
+        Rect {
+            y: parts[1].y,
+            height: 1,
+            ..parts[1]
+        },
+        MouseTarget::UnlockCheck,
+    );
+    frame.render_widget(
+        Paragraph::new(action).alignment(Alignment::Center),
+        parts[1],
+    );
 }
 
 fn render_help(frame: &mut Frame, area: Rect, hits: &mut MouseMap) {

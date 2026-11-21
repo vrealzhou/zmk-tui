@@ -24,6 +24,11 @@ use crate::tui::modals::{
 };
 use crate::tui::mouse::{ListKind, MouseMap, MouseTarget};
 
+/// Delay before retrying a failed keymap read from the keyboard.
+const SNAPSHOT_RETRY_DELAY: Duration = Duration::from_secs(1);
+/// How many times a failed keymap read is retried before giving up.
+const MAX_SNAPSHOT_RETRIES: u32 = 5;
+
 #[derive(Debug, Clone, Default)]
 pub struct StartOptions {
     pub port: Option<String>,
@@ -35,6 +40,8 @@ pub enum Msg {
     Key(KeyEvent),
     Mouse(MouseEvent),
     Tick,
+    /// The terminal input thread stopped (stdin closed or a read error).
+    InputClosed,
     UsbDevices(Vec<serial::UsbDevice>),
     BluetoothDevices(Result<Vec<ble::BleDevice>, String>),
     ConnectResult(Result<Connected, String>),
@@ -55,8 +62,14 @@ pub enum Msg {
         then_quit: bool,
     },
     KeymapRefreshed(Result<Keymap, StudioError>),
+    /// A keymap and physical-layout refresh, used after a discard because the
+    /// firmware also reverts its physical-layout selection.
+    EditRefreshed(Result<(Keymap, PhysicalLayouts), StudioError>),
     LayerAdded(Result<u32, StudioError>),
-    LayerRemoved(Result<(), StudioError>),
+    LayerRemoved {
+        result: Result<(), StudioError>,
+        index: usize,
+    },
     LayerMoved {
         result: Result<Keymap, StudioError>,
         to: usize,
@@ -243,6 +256,9 @@ pub struct App {
     pub tick: u64,
     pub should_quit: bool,
     pub mouse: MouseMap,
+    /// Keyboard-viewport size recorded by the last render, used so directional
+    /// navigation follows the grid the user actually sees.
+    pub keyboard_viewport: layout::Viewport,
     last_click: Option<(MouseTarget, Instant)>,
     pub start: StartOptions,
     simulator: Option<Simulator>,
@@ -250,7 +266,14 @@ pub struct App {
     scanning_inflight: bool,
     lock_poll_inflight: bool,
     last_lock_poll: Instant,
+    snapshot_retry_at: Option<Instant>,
     pending_layer_select: Option<usize>,
+    /// Incremented whenever a local keymap mutation starts. A snapshot that was
+    /// requested before the mutation carries stale data and must not overwrite
+    /// the newer local edits.
+    mutation_generation: u64,
+    snapshot_generation: u64,
+    snapshot_attempts: u32,
 }
 
 impl App {
@@ -265,6 +288,7 @@ impl App {
             tick: 0,
             should_quit: false,
             mouse: MouseMap::default(),
+            keyboard_viewport: layout::Viewport::default(),
             last_click: None,
             start,
             simulator: None,
@@ -272,7 +296,21 @@ impl App {
             lock_poll_inflight: false,
             scanning_inflight: false,
             last_lock_poll: Instant::now(),
+            snapshot_retry_at: None,
             pending_layer_select: None,
+            mutation_generation: 0,
+            snapshot_generation: 0,
+            snapshot_attempts: 0,
+        }
+    }
+
+    /// Record that a local keymap mutation is in flight: the keymap is now
+    /// unsaved (even before the device confirms) and any snapshot requested
+    /// earlier becomes stale.
+    fn begin_mutation(&mut self) {
+        self.mutation_generation = self.mutation_generation.wrapping_add(1);
+        if let Some(editor) = &mut self.editor {
+            editor.dirty = true;
         }
     }
 
@@ -301,6 +339,7 @@ impl App {
             Msg::Key(key) => self.handle_key(key),
             Msg::Mouse(mouse) => self.handle_mouse(mouse),
             Msg::Tick => self.on_tick(),
+            Msg::InputClosed => self.should_quit = true,
             message @ (Msg::UsbDevices(_)
             | Msg::BluetoothDevices(_)
             | Msg::ConnectResult(_)
@@ -309,9 +348,10 @@ impl App {
             | Msg::BindingSet { .. }
             | Msg::Saved { .. }
             | Msg::Discarded { .. }
-            | Msg::KeymapRefreshed(_)) => self.handle_edit_message(message),
+            | Msg::KeymapRefreshed(_)
+            | Msg::EditRefreshed(_)) => self.handle_edit_message(message),
             message @ (Msg::LayerAdded(_)
-            | Msg::LayerRemoved(_)
+            | Msg::LayerRemoved { .. }
             | Msg::LayerMoved { .. }
             | Msg::LayerRenamed { .. }
             | Msg::LayoutChanged { .. }
@@ -349,6 +389,11 @@ impl App {
     }
 
     fn handle_edit_message(&mut self, message: Msg) {
+        // A completion that arrives after the keyboard disconnected must not
+        // touch (or toast about) the now-empty editor.
+        if self.editor.is_none() {
+            return;
+        }
         match message {
             Msg::Snapshot(result) => self.handle_snapshot(result),
             Msg::BindingSet {
@@ -356,153 +401,238 @@ impl App {
                 layer_id,
                 position,
                 binding,
-            } => match result {
-                Ok(()) => {
-                    if let Some(editor) = &mut self.editor {
-                        if let Some(layer) = editor
-                            .keymap
-                            .layers
-                            .iter_mut()
-                            .find(|layer| layer.id == layer_id)
-                        {
-                            if let Some(slot) = layer.bindings.get_mut(position) {
-                                *slot = binding;
-                            }
-                        }
-                        editor.dirty = true;
-                    }
-                    self.busy = None;
-                    self.modal = None;
-                    self.toast("Binding updated — press s to save", StatusKind::Success);
-                }
-                Err(error) => self.handle_studio_error(error),
-            },
-            Msg::Saved { result, then_quit } => match result {
-                Ok(()) => {
-                    if let Some(editor) = &mut self.editor {
-                        editor.dirty = false;
-                    }
-                    self.busy = None;
-                    self.toast("Saved to keyboard", StatusKind::Success);
-                    if then_quit {
-                        self.should_quit = true;
-                    }
-                }
-                Err(error) => self.handle_studio_error(error),
-            },
-            Msg::Discarded { result, then_quit } => match result {
-                Ok(()) => {
-                    if let Some(editor) = &mut self.editor {
-                        editor.dirty = false;
-                    }
-                    self.busy = None;
-                    self.toast("Discarded unsaved changes", StatusKind::Info);
-                    if then_quit {
-                        self.should_quit = true;
-                    } else {
-                        self.spawn_refresh_keymap();
-                    }
-                }
-                Err(error) => self.handle_studio_error(error),
-            },
-            Msg::KeymapRefreshed(result) => match result {
-                Ok(keymap) => {
-                    if let Some(editor) = &mut self.editor {
-                        editor.keymap = keymap;
-                        if let Some(index) = self.pending_layer_select.take() {
-                            editor.layer_index = index;
-                        }
-                        editor.clamp();
-                    }
-                    self.busy = None;
-                }
-                Err(error) => self.handle_studio_error(error),
-            },
+            } => self.finish_binding_set(result, layer_id, position, binding),
+            Msg::Saved { result, then_quit } => self.finish_saved(result, then_quit),
+            Msg::Discarded { result, then_quit } => self.finish_discarded(result, then_quit),
+            Msg::KeymapRefreshed(result) => self.finish_keymap_refresh(result),
+            Msg::EditRefreshed(result) => self.finish_edit_refresh(result),
             _ => unreachable!("only edit messages reach this handler"),
         }
     }
 
+    fn finish_binding_set(
+        &mut self,
+        result: Result<(), StudioError>,
+        layer_id: u32,
+        position: usize,
+        binding: Binding,
+    ) {
+        if let Err(error) = result {
+            self.handle_studio_error(error);
+            return;
+        }
+        if let Some(editor) = &mut self.editor {
+            if let Some(layer) = editor
+                .keymap
+                .layers
+                .iter_mut()
+                .find(|layer| layer.id == layer_id)
+            {
+                if let Some(slot) = layer.bindings.get_mut(position) {
+                    *slot = binding;
+                }
+            }
+            editor.dirty = true;
+        }
+        self.busy = None;
+        self.toast("Binding updated — press s to save", StatusKind::Success);
+    }
+
+    fn finish_saved(&mut self, result: Result<(), StudioError>, then_quit: bool) {
+        if let Err(error) = result {
+            self.handle_studio_error(error);
+            return;
+        }
+        if let Some(editor) = &mut self.editor {
+            editor.dirty = false;
+        }
+        self.busy = None;
+        self.toast("Saved to keyboard", StatusKind::Success);
+        if then_quit {
+            self.should_quit = true;
+        }
+    }
+
+    fn finish_discarded(&mut self, result: Result<(), StudioError>, then_quit: bool) {
+        if let Err(error) = result {
+            self.handle_studio_error(error);
+            return;
+        }
+        if let Some(editor) = &mut self.editor {
+            editor.dirty = false;
+        }
+        self.busy = None;
+        self.toast("Discarded unsaved changes", StatusKind::Info);
+        if then_quit {
+            self.should_quit = true;
+        } else {
+            self.spawn_refresh_edit();
+        }
+    }
+
+    fn finish_keymap_refresh(&mut self, result: Result<Keymap, StudioError>) {
+        let keymap = match result {
+            Ok(keymap) => keymap,
+            Err(error) => {
+                self.pending_layer_select = None;
+                self.handle_studio_error(error);
+                return;
+            }
+        };
+        if let Some(editor) = &mut self.editor {
+            editor.keymap = keymap;
+            editor.keymap_loaded = true;
+            if let Some(index) = self.pending_layer_select.take() {
+                editor.layer_index = index;
+            }
+            editor.clamp();
+        }
+        self.busy = None;
+    }
+
+    fn finish_edit_refresh(&mut self, result: Result<(Keymap, PhysicalLayouts), StudioError>) {
+        let (keymap, layouts) = match result {
+            Ok(refreshed) => refreshed,
+            Err(error) => {
+                self.pending_layer_select = None;
+                self.handle_studio_error(error);
+                return;
+            }
+        };
+        if let Some(editor) = &mut self.editor {
+            editor.keymap = keymap;
+            editor.layouts = layouts;
+            editor.keymap_loaded = true;
+            if let Some(index) = self.pending_layer_select.take() {
+                editor.layer_index = index;
+            }
+            editor.clamp();
+        }
+        self.busy = None;
+    }
+
     fn handle_layer_message(&mut self, message: Msg) {
+        if self.editor.is_none() {
+            return;
+        }
         match message {
-            Msg::LayerAdded(result) => match result {
-                Ok(index) => {
-                    self.pending_layer_select = Some(index as usize);
-                    self.spawn_refresh_keymap();
-                    self.toast("Layer added", StatusKind::Success);
-                }
-                Err(error) => self.handle_studio_error(error),
-            },
-            Msg::LayerRemoved(result) => match result {
-                Ok(()) => {
-                    self.spawn_refresh_keymap();
-                    self.toast("Layer removed", StatusKind::Success);
-                }
-                Err(error) => self.handle_studio_error(error),
-            },
-            Msg::LayerMoved { result, to } => match result {
-                Ok(keymap) => {
-                    if let Some(editor) = &mut self.editor {
-                        editor.keymap = keymap;
-                        editor.layer_index = to;
-                        editor.dirty = true;
-                        editor.clamp();
-                    }
-                    self.busy = None;
-                    self.modal = None;
-                    self.toast("Layer moved", StatusKind::Success);
-                }
-                Err(error) => self.handle_studio_error(error),
-            },
+            Msg::LayerAdded(result) => self.finish_layer_added(result),
+            Msg::LayerRemoved { result, index } => self.finish_layer_removed(result, index),
+            Msg::LayerMoved { result, to } => self.finish_layer_moved(result, to),
             Msg::LayerRenamed {
                 result,
                 layer_id,
                 name,
-            } => match result {
-                Ok(()) => {
-                    if let Some(editor) = &mut self.editor {
-                        if let Some(layer) = editor
-                            .keymap
-                            .layers
-                            .iter_mut()
-                            .find(|layer| layer.id == layer_id)
-                        {
-                            layer.name = name;
-                        }
-                        editor.dirty = true;
-                    }
-                    self.busy = None;
-                    self.toast("Layer renamed", StatusKind::Success);
-                }
-                Err(error) => self.handle_studio_error(error),
-            },
-            Msg::LayoutChanged { result, index } => match result {
-                Ok(keymap) => {
-                    if let Some(editor) = &mut self.editor {
-                        editor.keymap = keymap;
-                        editor.layouts.active_index = index;
-                        editor.dirty = true;
-                        editor.clamp();
-                    }
-                    self.busy = None;
-                    self.modal = None;
-                    self.toast("Physical layout changed", StatusKind::Success);
-                }
-                Err(error) => self.handle_studio_error(error),
-            },
+            } => self.finish_layer_renamed(result, layer_id, name),
+            Msg::LayoutChanged { result, index } => self.finish_layout_changed(result, index),
             Msg::LockPolled(result) => self.handle_lock_polled(result),
-            Msg::ResetSettings(result) => match result {
-                Ok(()) => {
-                    if let Some(editor) = &mut self.editor {
-                        editor.dirty = false;
-                    }
-                    self.busy = None;
-                    self.toast("Stock settings restored", StatusKind::Success);
-                    self.spawn_snapshot_load();
-                }
-                Err(error) => self.handle_studio_error(error),
-            },
+            Msg::ResetSettings(result) => self.finish_reset_settings(result),
             _ => unreachable!("only layer/session messages reach this handler"),
         }
+    }
+
+    fn finish_layer_added(&mut self, result: Result<u32, StudioError>) {
+        match result {
+            Ok(index) => {
+                self.pending_layer_select = Some(index as usize);
+                self.spawn_refresh_keymap();
+                self.toast("Layer added", StatusKind::Success);
+            }
+            Err(error) => self.handle_studio_error(error),
+        }
+    }
+
+    fn finish_layer_removed(&mut self, result: Result<(), StudioError>, index: usize) {
+        if let Err(error) = result {
+            self.handle_studio_error(error);
+            return;
+        }
+        if let Some(editor) = &mut self.editor {
+            // Keep showing the same layer when a layer *below* the selection
+            // was removed; `clamp` handles removing the selected layer itself.
+            if index < editor.layer_index {
+                editor.layer_index -= 1;
+            }
+        }
+        self.spawn_refresh_keymap();
+        self.toast("Layer removed", StatusKind::Success);
+    }
+
+    fn finish_layer_moved(&mut self, result: Result<Keymap, StudioError>, to: usize) {
+        let keymap = match result {
+            Ok(keymap) => keymap,
+            Err(error) => {
+                self.handle_studio_error(error);
+                return;
+            }
+        };
+        if let Some(editor) = &mut self.editor {
+            editor.keymap = keymap;
+            editor.layer_index = to;
+            editor.dirty = true;
+            editor.clamp();
+        }
+        self.busy = None;
+        self.toast("Layer moved", StatusKind::Success);
+    }
+
+    fn finish_layer_renamed(
+        &mut self,
+        result: Result<(), StudioError>,
+        layer_id: u32,
+        name: String,
+    ) {
+        if let Err(error) = result {
+            self.handle_studio_error(error);
+            return;
+        }
+        if let Some(editor) = &mut self.editor {
+            if let Some(layer) = editor
+                .keymap
+                .layers
+                .iter_mut()
+                .find(|layer| layer.id == layer_id)
+            {
+                layer.name = name;
+            }
+            editor.dirty = true;
+        }
+        self.busy = None;
+        self.toast("Layer renamed", StatusKind::Success);
+    }
+
+    fn finish_layout_changed(&mut self, result: Result<Keymap, StudioError>, index: usize) {
+        let keymap = match result {
+            Ok(keymap) => keymap,
+            Err(error) => {
+                self.handle_studio_error(error);
+                return;
+            }
+        };
+        if let Some(editor) = &mut self.editor {
+            let changed = editor.layouts.active_index != index;
+            editor.keymap = keymap;
+            editor.layouts.active_index = index;
+            if changed {
+                editor.dirty = true;
+            }
+            editor.clamp();
+        }
+        self.busy = None;
+        self.toast("Physical layout changed", StatusKind::Success);
+    }
+
+    fn finish_reset_settings(&mut self, result: Result<(), StudioError>) {
+        if let Err(error) = result {
+            self.handle_studio_error(error);
+            return;
+        }
+        if let Some(editor) = &mut self.editor {
+            editor.dirty = false;
+        }
+        self.busy = None;
+        self.toast("Stock settings restored", StatusKind::Success);
+        self.spawn_snapshot_load();
     }
 
     // ------------------------------------------------------------------
@@ -820,6 +950,7 @@ impl App {
 
     fn apply_action(&mut self, action: UiAction) {
         match action {
+            UiAction::Notice(message) => self.toast(message, StatusKind::Warning),
             UiAction::ApplyBinding {
                 layer_id,
                 position,
@@ -986,11 +1117,23 @@ impl App {
     // ------------------------------------------------------------------
 
     fn navigate(&mut self, direction: Direction) {
+        let viewport = self.keyboard_viewport;
         let Some(editor) = &mut self.editor else {
             return;
         };
-        let layout = editor.effective_layout();
-        if let Some(next) = layout::move_selection(&layout, editor.selected, direction) {
+        let physical = editor.effective_layout();
+        let next = if viewport.width > 0 && viewport.height > 0 {
+            // Navigate on the rendered grid so column stagger does not turn a
+            // horizontal step into an "up" move.
+            layout::compute(&physical, viewport).move_selection(
+                &physical,
+                editor.selected,
+                direction,
+            )
+        } else {
+            layout::move_selection(&physical, editor.selected, direction)
+        };
+        if let Some(next) = next {
             editor.selected = next;
         }
     }
@@ -1209,6 +1352,13 @@ impl App {
     fn handle_connect_result(&mut self, result: Result<Connected, String>) {
         self.connect_inflight = false;
         self.busy = None;
+        self.snapshot_retry_at = None;
+        self.snapshot_attempts = 0;
+        self.pending_layer_select = None;
+        // Leaving the connect screen invalidates the scan bookkeeping: an
+        // in-flight scan must not block the scan that a later disconnect needs.
+        self.scanning_inflight = false;
+        self.connect.scanning = false;
         match result {
             Err(error) => {
                 self.toast(error, StatusKind::Error);
@@ -1225,9 +1375,18 @@ impl App {
                     .map(|snapshot| snapshot.warnings.clone())
                     .unwrap_or_default();
                 let name = connected.info.name.clone();
-                let locked = connected.lock.is_locked();
                 let has_snapshot = connected.snapshot.is_some();
-                let editor = EditorState::new(connected);
+                let mut editor = EditorState::new(connected);
+                // Lock notifications that arrived during the handshake were
+                // forwarded before the editor existed and therefore dropped;
+                // the client cached their state, so reconcile with it now.
+                let cached_lock = editor.client.try_cached_lock_state().flatten();
+                if let Some(cached) = cached_lock {
+                    if cached.is_locked() != editor.locked {
+                        editor.locked = cached.is_locked();
+                    }
+                }
+                let locked = editor.locked;
                 let layout = editor.active_layout_name().to_string();
                 self.editor = Some(editor);
                 self.connect = ConnectState::default();
@@ -1324,6 +1483,8 @@ impl App {
     }
 
     fn handle_disconnect(&mut self, reason: String) {
+        self.snapshot_retry_at = None;
+        self.snapshot_attempts = 0;
         if self.editor.is_none() {
             return;
         }
@@ -1333,6 +1494,8 @@ impl App {
         self.simulator = None;
         self.connect_inflight = false;
         self.lock_poll_inflight = false;
+        self.pending_layer_select = None;
+        self.scanning_inflight = false;
         self.toast(format!("Disconnected: {reason}"), StatusKind::Error);
         self.connect = ConnectState::default();
         self.refresh_usb();
@@ -1362,6 +1525,45 @@ impl App {
         if should_poll {
             self.spawn_lock_poll();
         }
+        self.retry_snapshot_if_due();
+    }
+
+    /// Retry a failed initial keymap load. Without this, one timeout or
+    /// transient error leaves the editor showing its loading spinner forever:
+    /// the only other trigger is an unlock notification.
+    fn retry_snapshot_if_due(&mut self) {
+        let Some(retry_at) = self.snapshot_retry_at else {
+            return;
+        };
+        let loaded = self
+            .editor
+            .as_ref()
+            .map(|editor| editor.keymap_loaded)
+            .unwrap_or(false);
+        if self.editor.is_none() || loaded {
+            self.snapshot_retry_at = None;
+            self.snapshot_attempts = 0;
+            return;
+        }
+        if Instant::now() < retry_at || self.busy.is_some() {
+            return;
+        }
+        self.snapshot_retry_at = None;
+        self.snapshot_attempts += 1;
+        if self.snapshot_attempts > MAX_SNAPSHOT_RETRIES {
+            // A persistent failure should not turn into a request loop; leave a
+            // message that says how to retry manually.
+            self.toast(
+                "Could not read the keymap — press u to retry",
+                StatusKind::Error,
+            );
+            return;
+        }
+        self.start_snapshot_load(false);
+    }
+
+    fn schedule_snapshot_retry(&mut self) {
+        self.snapshot_retry_at = Some(Instant::now() + SNAPSHOT_RETRY_DELAY);
     }
 
     fn spawn_lock_poll(&mut self) {
@@ -1381,12 +1583,23 @@ impl App {
     }
 
     fn spawn_snapshot_load(&mut self) {
+        self.start_snapshot_load(true);
+    }
+
+    fn start_snapshot_load(&mut self, reset_attempts: bool) {
         let Some(client) = self.client() else {
             return;
         };
         if self.busy.is_some() {
+            // Another request owns the pipe; try again once it has finished.
+            self.schedule_snapshot_retry();
             return;
         }
+        self.snapshot_retry_at = None;
+        if reset_attempts {
+            self.snapshot_attempts = 0;
+        }
+        self.snapshot_generation = self.mutation_generation;
         self.busy = Some("Reading keymap from keyboard…".into());
         let tx = self.tx.clone();
         tokio::spawn(async move {
@@ -1399,18 +1612,34 @@ impl App {
         match result {
             Ok(snapshot) => {
                 let warnings = snapshot.warnings.clone();
+                // The load is a sequence of RPCs; edits made while it ran are
+                // newer than the payload. Keep the newer local keymap and dirty
+                // state in that case (the catalog and layouts are never edited
+                // locally, so they are always safe to apply).
+                let stale = self.snapshot_generation != self.mutation_generation;
                 if let Some(editor) = &mut self.editor {
-                    editor.keymap = snapshot.keymap;
+                    if !stale {
+                        editor.keymap = snapshot.keymap;
+                        editor.dirty = snapshot.dirty;
+                    }
                     editor.layouts = snapshot.layouts;
                     editor.catalog = snapshot.catalog;
-                    editor.dirty = snapshot.dirty;
                     editor.keymap_loaded = true;
-                    editor.locked = false;
                     editor.clamp();
                 }
-                if matches!(self.modal, Some(Modal::Unlock(_))) {
+                self.snapshot_attempts = 0;
+                // A successful load does not prove the keyboard is still
+                // unlocked: a lock notification may have arrived while it ran
+                // and must not be overwritten here.
+                let locked = self
+                    .editor
+                    .as_ref()
+                    .map(|editor| editor.locked)
+                    .unwrap_or(false);
+                if !locked && matches!(self.modal, Some(Modal::Unlock(_))) {
                     self.modal = None;
                 }
+                self.pending_layer_select = None;
                 self.busy = None;
                 let layout = self
                     .editor
@@ -1437,9 +1666,18 @@ impl App {
                     editor.locked = true;
                 }
                 self.busy = None;
+                self.snapshot_attempts = 0;
                 self.modal = Some(Modal::Unlock(UnlockModal::default()));
             }
-            Err(error) => self.handle_studio_error(error),
+            Err(error) => {
+                self.handle_studio_error(error);
+                // The device is reachable but the load failed (usually a
+                // timeout); schedule a retry so the UI cannot stay stuck on
+                // "Reading keymap…" forever.
+                if self.editor.is_some() {
+                    self.schedule_snapshot_retry();
+                }
+            }
         }
     }
 
@@ -1447,6 +1685,7 @@ impl App {
         let Some(client) = self.client() else {
             return;
         };
+        self.begin_mutation();
         self.busy = Some("Updating binding…".into());
         let tx = self.tx.clone();
         tokio::spawn(async move {
@@ -1504,6 +1743,7 @@ impl App {
         let Some(client) = self.client() else {
             return;
         };
+        self.begin_mutation();
         self.busy = Some("Adding layer…".into());
         let tx = self.tx.clone();
         tokio::spawn(async move {
@@ -1516,11 +1756,12 @@ impl App {
         let Some(client) = self.client() else {
             return;
         };
+        self.begin_mutation();
         self.busy = Some("Removing layer…".into());
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let result = client.remove_layer(index).await;
-            let _ = tx.send(Msg::LayerRemoved(result));
+            let _ = tx.send(Msg::LayerRemoved { result, index });
         });
     }
 
@@ -1528,6 +1769,7 @@ impl App {
         let Some(client) = self.client() else {
             return;
         };
+        self.begin_mutation();
         self.busy = Some("Moving layer…".into());
         let tx = self.tx.clone();
         tokio::spawn(async move {
@@ -1540,6 +1782,7 @@ impl App {
         let Some(client) = self.client() else {
             return;
         };
+        self.begin_mutation();
         self.busy = Some("Renaming layer…".into());
         let tx = self.tx.clone();
         let sent_name = name.clone();
@@ -1557,6 +1800,13 @@ impl App {
         let Some(client) = self.client() else {
             return;
         };
+        if self
+            .editor
+            .as_ref()
+            .is_some_and(|editor| editor.layouts.active_index != index)
+        {
+            self.begin_mutation();
+        }
         self.busy = Some("Changing physical layout…".into());
         let tx = self.tx.clone();
         tokio::spawn(async move {
@@ -1574,6 +1824,32 @@ impl App {
         tokio::spawn(async move {
             let result = client.get_keymap().await;
             let _ = tx.send(Msg::KeymapRefreshed(result));
+        });
+    }
+
+    /// Refresh the keymap and the physical-layout selection together. Called
+    /// after a discard, because the firmware reverts its selected physical
+    /// layout as part of discarding and a keymap-only refresh would leave the
+    /// editor drawing the layout that was just reverted.
+    fn spawn_refresh_edit(&mut self) {
+        let Some(client) = self.client() else {
+            return;
+        };
+        self.busy = Some("Refreshing keymap…".into());
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = async {
+                let keymap = client.get_keymap().await?;
+                let layouts = match client.get_physical_layouts().await {
+                    Ok(layouts) => layouts,
+                    // Firmware without the layout RPC keeps the generic grid.
+                    Err(StudioError::RpcNotFound) => PhysicalLayouts::default(),
+                    Err(error) => return Err(error),
+                };
+                Ok((keymap, layouts))
+            }
+            .await;
+            let _ = tx.send(Msg::EditRefreshed(result));
         });
     }
 

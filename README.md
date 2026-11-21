@@ -162,8 +162,9 @@ shortcuts (`a`, `r`, `x`, `J`/`K`) remain keyboard actions.
 `a` add · `r` rename · `x` remove · `J`/`K` move down/up · `Enter` switch ·
 `Esc` close.
 
-The layer bar shows every layer reported by the firmware. The manager can add
-layers only into the free slots the firmware advertises; on real hardware, see
+The layer bar shows the layers reported by the firmware, scrolling (`‹`/`›`) when
+they do not all fit. The manager can add layers only into the free slots the
+firmware advertises; on real hardware, see
 the [developer guide](docs/developer-guide.md#layers-slots-and-storage) for
 reserved-layer setup.
 

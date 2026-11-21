@@ -299,3 +299,104 @@ async fn simulator_can_be_relocked() {
         Err(StudioError::UnlockRequired)
     ));
 }
+
+#[tokio::test]
+async fn validates_binding_parameters_like_the_firmware() {
+    let (_sim, client) = connected(false).await;
+    let keymap = client.get_keymap().await.unwrap();
+    let layer_id = keymap.layers[0].id;
+
+    // A keyboard HID usage beyond the advertised `keyboard_max` is rejected by
+    // the firmware's `validate_hid_usage`; the simulator mirrors that.
+    let out_of_range = zmk_tui::keycodes::by_value(0x0007_00E8)
+        .or_else(|| (0xE8..=0xFB).find_map(|id| zmk_tui::keycodes::by_page_id(0x07, id)))
+        .expect("a keyboard usage beyond the modifier block");
+    assert!(matches!(
+        client
+            .set_layer_binding(
+                layer_id,
+                0,
+                Binding {
+                    behavior_id: 1001,
+                    param1: out_of_range.value,
+                    param2: 0,
+                }
+            )
+            .await,
+        Err(StudioError::Device(_))
+    ));
+
+    // A valid keycode is accepted.
+    let a = zmk_tui::keycodes::from_name("A").unwrap().value;
+    client
+        .set_layer_binding(
+            layer_id,
+            0,
+            Binding {
+                behavior_id: 1001,
+                param1: a,
+                param2: 0,
+            },
+        )
+        .await
+        .expect("valid binding");
+}
+
+#[tokio::test]
+async fn layer_names_respect_the_firmware_buffer_size() {
+    let (_sim, client) = connected(false).await;
+
+    // The firmware stores names in a buffer of `max_layer_name_length` bytes
+    // and rejects a name that fills it.
+    let keymap = client.get_keymap().await.unwrap();
+    let buffer = keymap.max_layer_name_length;
+    assert!(buffer > 2, "simulator advertises a usable buffer");
+    let too_long = "x".repeat(buffer);
+    assert!(matches!(
+        client.set_layer_props(0, &too_long).await,
+        Err(StudioError::Device(_))
+    ));
+
+    let longest = "x".repeat(buffer - 1);
+    client
+        .set_layer_props(0, &longest)
+        .await
+        .expect("longest valid name");
+
+    // An empty name is a firmware no-op success.
+    client.set_layer_props(0, "").await.expect("empty name");
+    assert_eq!(client.get_keymap().await.unwrap().layers[0].name, longest);
+
+    assert!(matches!(
+        client.set_layer_props(9999, "nope").await,
+        Err(StudioError::Device(_))
+    ));
+}
+
+#[tokio::test]
+async fn discard_reverts_the_physical_layout_selection() {
+    let (_sim, client) = connected(false).await;
+    let layouts = client.get_physical_layouts().await.unwrap();
+    assert_eq!(layouts.active_index, 0);
+    assert!(layouts.layouts.len() > 1);
+
+    client.set_active_physical_layout(1).await.unwrap();
+    assert_eq!(client.get_physical_layouts().await.unwrap().active_index, 1);
+    assert!(client.check_unsaved_changes().await.unwrap());
+
+    client.discard_changes().await.expect("discard");
+    assert_eq!(
+        client.get_physical_layouts().await.unwrap().active_index,
+        0,
+        "the firmware re-selects the stock physical layout on discard"
+    );
+}
+
+#[tokio::test]
+async fn reselecting_the_active_layout_is_not_an_edit() {
+    let (_sim, client) = connected(false).await;
+    assert!(!client.check_unsaved_changes().await.unwrap());
+
+    client.set_active_physical_layout(0).await.unwrap();
+    assert!(!client.check_unsaved_changes().await.unwrap());
+}

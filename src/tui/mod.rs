@@ -79,6 +79,9 @@ async fn run_loop(
         tokio::select! {
             message = rx.recv() => {
                 match message {
+                    // The terminal went away; stop instead of spinning on ticks
+                    // with no way to receive input.
+                    Some(Msg::InputClosed) => break,
                     Some(message) => app.handle(message),
                     None => bail!("terminal input ended unexpectedly"),
                 }
@@ -119,7 +122,10 @@ fn spawn_input_thread(tx: mpsc::UnboundedSender<Msg>) {
                         }
                     }
                     Ok(_) => {}
-                    Err(_) => break,
+                    Err(_) => {
+                        let _ = tx.send(Msg::InputClosed);
+                        break;
+                    }
                 }
             }
         })

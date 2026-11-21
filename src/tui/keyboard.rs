@@ -37,22 +37,11 @@ pub fn render(frame: &mut Frame, area: Rect, editor: &EditorState, hits: &mut Mo
     for (position, cell) in
         (0..grid.len()).filter_map(|position| grid.cell(position).map(|cell| (position, cell)))
     {
-        let rect = Rect {
-            x: area
-                .x
-                .saturating_add(margin_x)
-                .saturating_add(cell.x.saturating_sub(offset_x)),
-            y: area
-                .y
-                .saturating_add(margin_y)
-                .saturating_add(cell.y.saturating_sub(offset_y)),
-            width: cell.width,
-            height: cell.height,
-        };
-        let clip = rect.intersection(area);
-        if clip.width == 0 || clip.height == 0 {
+        // Signed placement: cells scrolled off the top/left edge must be
+        // clipped away, not clamped onto the edge and drawn over other keys.
+        let Some(clip) = place(area, cell, margin_x, margin_y, offset_x, offset_y) else {
             continue;
-        }
+        };
 
         let binding = editor
             .layer()
@@ -100,6 +89,35 @@ pub fn render(frame: &mut Frame, area: Rect, editor: &EditorState, hits: &mut Mo
                 .set_stringn(clip.x, row, main, width, main_style);
         }
     }
+}
+
+/// Project a grid cell into the terminal and clip it to `area`. Returns `None`
+/// when the cell is completely outside the visible keyboard area.
+fn place(
+    area: Rect,
+    cell: layout::CellRect,
+    margin_x: u16,
+    margin_y: u16,
+    offset_x: u16,
+    offset_y: u16,
+) -> Option<Rect> {
+    let left = i32::from(area.x) + i32::from(margin_x) + i32::from(cell.x) - i32::from(offset_x);
+    let top = i32::from(area.y) + i32::from(margin_y) + i32::from(cell.y) - i32::from(offset_y);
+    let right = left + i32::from(cell.width);
+    let bottom = top + i32::from(cell.height);
+    let clip_left = left.max(i32::from(area.x));
+    let clip_top = top.max(i32::from(area.y));
+    let clip_right = right.min(i32::from(area.right()));
+    let clip_bottom = bottom.min(i32::from(area.bottom()));
+    if clip_right <= clip_left || clip_bottom <= clip_top {
+        return None;
+    }
+    Some(Rect {
+        x: clip_left as u16,
+        y: clip_top as u16,
+        width: (clip_right - clip_left) as u16,
+        height: (clip_bottom - clip_top) as u16,
+    })
 }
 
 fn scroll_offset(area: Rect, grid: &layout::Grid, selected: usize) -> (u16, u16) {

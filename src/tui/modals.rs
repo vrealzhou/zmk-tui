@@ -40,6 +40,8 @@ pub enum UiAction {
     QuitDiscard,
     QuitAnyway,
     CheckUnlock,
+    /// Informational message that keeps the current modal open.
+    Notice(String),
 }
 
 pub enum Modal {
@@ -315,8 +317,23 @@ impl LayerModal {
                 None
             }
             KeyCode::Enter => selected(&self.state, len).map(UiAction::SelectLayer),
-            KeyCode::Char('a') => Some(UiAction::AddLayer),
-            KeyCode::Char('x') => selected(&self.state, len).map(UiAction::AskRemoveLayer),
+            KeyCode::Char('a') => {
+                if keymap.available_layers == 0 {
+                    return Some(UiAction::Notice(
+                        "No free layer slots — the firmware must reserve more layers".into(),
+                    ));
+                }
+                Some(UiAction::AddLayer)
+            }
+            KeyCode::Char('x') => {
+                let index = selected(&self.state, len)?;
+                if len <= 1 {
+                    return Some(UiAction::Notice(
+                        "The keymap must keep at least one layer".into(),
+                    ));
+                }
+                Some(UiAction::AskRemoveLayer(index))
+            }
             KeyCode::Char('J') => {
                 let index = selected(&self.state, len)?;
                 if index + 1 < len {
@@ -342,10 +359,19 @@ impl LayerModal {
             KeyCode::Char('r') => {
                 let index = selected(&self.state, len)?;
                 let layer = keymap.layers.get(index)?;
+                // `max_layer_name_length` is the firmware's name *buffer* size;
+                // `zmk_keymap_set_layer_name` rejects a name of that length, so
+                // the longest valid name is one byte shorter.
+                let max_len = keymap.max_layer_name_length.saturating_sub(1).min(64);
+                if max_len == 0 {
+                    return Some(UiAction::Notice(
+                        "This firmware does not support layer names".into(),
+                    ));
+                }
                 self.renaming = Some(RenameState {
                     layer_id: layer.id,
                     value: layer.name.clone(),
-                    max_len: keymap.max_layer_name_length.clamp(4, 64),
+                    max_len,
                 });
                 None
             }
@@ -360,6 +386,7 @@ impl LayerModal {
 
 pub struct LayoutModal {
     pub state: ListState,
+    pub count: usize,
 }
 
 impl LayoutModal {
@@ -368,12 +395,16 @@ impl LayoutModal {
         if count > 0 {
             state.select(Some(active.min(count - 1)));
         }
-        Self { state }
+        Self { state, count }
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Option<UiAction> {
-        // The layout count is not known here; the app clamps out-of-range
-        // selections when it renders or applies them.
+        if self.count == 0 {
+            return match key.code {
+                KeyCode::Esc => Some(UiAction::Close),
+                _ => None,
+            };
+        }
         match key.code {
             KeyCode::Esc => Some(UiAction::Close),
             KeyCode::Up => {
@@ -384,7 +415,15 @@ impl LayoutModal {
             }
             KeyCode::Down => {
                 let selected = self.state.selected().unwrap_or(0);
-                self.state.select(Some(selected + 1));
+                self.state.select(Some((selected + 1).min(self.count - 1)));
+                None
+            }
+            KeyCode::Home => {
+                self.state.select(Some(0));
+                None
+            }
+            KeyCode::End => {
+                self.state.select(Some(self.count - 1));
                 None
             }
             KeyCode::Enter => self.state.selected().map(UiAction::SetLayout),
@@ -407,7 +446,10 @@ pub enum Stage {
 
 pub struct BindingWizard {
     pub position: usize,
-    pub layer_index: usize,
+    /// The layer's device-local ID, captured when the wizard opened. Applying
+    /// by ID keeps the edit on the layer the user was shown even if layers are
+    /// added, removed or reordered while the wizard is open.
+    pub layer_id: u32,
     pub stage: Stage,
     pub behavior: u32,
     pub behavior_filter: String,
@@ -430,9 +472,9 @@ pub struct ParamItem {
 
 impl BindingWizard {
     pub fn new(keymap: &Keymap, catalog: &Catalog, layer_index: usize, position: usize) -> Self {
-        let current = keymap
-            .layers
-            .get(layer_index)
+        let layer = keymap.layers.get(layer_index);
+        let layer_id = layer.map(|layer| layer.id).unwrap_or(0);
+        let current = layer
             .and_then(|layer| layer.bindings.get(position))
             .copied()
             .unwrap_or_default();
@@ -451,7 +493,7 @@ impl BindingWizard {
 
         Self {
             position,
-            layer_index,
+            layer_id,
             stage: Stage::Behavior,
             behavior,
             behavior_filter: String::new(),
@@ -469,7 +511,8 @@ impl BindingWizard {
     pub fn current_binding(&self, keymap: &Keymap) -> Binding {
         keymap
             .layers
-            .get(self.layer_index)
+            .iter()
+            .find(|layer| layer.id == self.layer_id)
             .and_then(|layer| layer.bindings.get(self.position))
             .copied()
             .unwrap_or_default()
@@ -499,9 +542,13 @@ impl BindingWizard {
                     None
                 }
                 KeyCode::Enter => {
-                    let layer_id = keymap.layers.get(self.layer_index)?.id;
+                    if keymap.layer_index_by_id(self.layer_id).is_none() {
+                        return Some(UiAction::Notice(
+                            "That layer was removed or reordered; reopen the binding editor".into(),
+                        ));
+                    }
                     Some(UiAction::ApplyBinding {
-                        layer_id,
+                        layer_id: self.layer_id,
                         position: self.position,
                         binding: self.pending_binding(),
                     })
@@ -525,12 +572,14 @@ impl BindingWizard {
             KeyCode::Esc => Some(UiAction::Close),
             KeyCode::Backspace => {
                 self.behavior_filter.pop();
-                reset_list(&mut self.behavior_state, items.len());
+                let remaining = behavior_items(catalog, &self.behavior_filter);
+                reset_list(&mut self.behavior_state, remaining.len());
                 None
             }
             KeyCode::Char(ch) if is_text_input(key, ch) => {
                 self.behavior_filter.push(ch);
-                reset_list(&mut self.behavior_state, items.len());
+                let filtered = behavior_items(catalog, &self.behavior_filter);
+                reset_list(&mut self.behavior_state, filtered.len());
                 None
             }
             KeyCode::Enter => {
@@ -577,6 +626,8 @@ impl BindingWizard {
         min: i32,
         max: i32,
     ) -> Option<UiAction> {
+        // A malformed device range must not panic `clamp`.
+        let max = max.max(min);
         self.range_min = min;
         self.range_max = max;
         match key.code {
@@ -585,22 +636,31 @@ impl BindingWizard {
                 self.reset_behavior_filter(catalog);
             }
             KeyCode::Up => {
-                self.range_value = (self.range_value + 1).min(max);
-                self.set_stage_value(self.range_value.max(min) as u32);
+                self.range_value = self.range_value.saturating_add(1).min(max);
+                self.set_stage_value(range_param_value(self.range_value, min));
             }
             KeyCode::Down => {
-                self.range_value = (self.range_value - 1).max(min);
-                self.set_stage_value(self.range_value.max(min) as u32);
+                self.range_value = self.range_value.saturating_sub(1).max(min);
+                self.set_stage_value(range_param_value(self.range_value, min));
             }
             KeyCode::Enter => {
-                self.set_stage_value(self.range_value.max(min) as u32);
+                self.set_stage_value(range_param_value(self.range_value, min));
                 self.advance_after_param(keymap, catalog);
             }
-            KeyCode::Backspace => self.range_value /= 10,
+            KeyCode::Backspace => {
+                // Keep the displayed value and the value that Enter will apply
+                // in sync.
+                self.range_value = (self.range_value / 10).max(min);
+                self.set_stage_value(range_param_value(self.range_value, min));
+            }
             KeyCode::Char(ch) if is_text_input(key, ch) && ch.is_ascii_digit() => {
                 let digit = ch.to_digit(10).unwrap_or(0) as i32;
-                self.range_value = (self.range_value.saturating_mul(10) + digit).clamp(min, max);
-                self.set_stage_value(self.range_value as u32);
+                self.range_value = self
+                    .range_value
+                    .saturating_mul(10)
+                    .saturating_add(digit)
+                    .clamp(min, max);
+                self.set_stage_value(range_param_value(self.range_value, min));
             }
             _ => {}
         }
@@ -625,11 +685,15 @@ impl BindingWizard {
             }
             KeyCode::Backspace => {
                 self.param_filter.pop();
-                reset_list(&mut self.param_state, items.len());
+                let remaining =
+                    param_items(keymap, catalog, self.behavior, stage, &self.param_filter);
+                reset_list(&mut self.param_state, remaining.len());
             }
             KeyCode::Char(ch) if is_text_input(key, ch) => {
                 self.param_filter.push(ch);
-                reset_list(&mut self.param_state, items.len());
+                let filtered =
+                    param_items(keymap, catalog, self.behavior, stage, &self.param_filter);
+                reset_list(&mut self.param_state, filtered.len());
             }
             KeyCode::Enter => {
                 let index = selected(&self.param_state, items.len())?;
@@ -649,7 +713,6 @@ impl BindingWizard {
             _ => {}
         }
     }
-
     fn advance_after_param(&mut self, keymap: &Keymap, catalog: &Catalog) {
         self.stage = match self.stage {
             Stage::Param1 => {
@@ -689,7 +752,8 @@ impl BindingWizard {
                     Stage::Param2 => self.param2,
                     _ => 0,
                 };
-                self.range_value = (current as i32).clamp(min, max);
+                self.range_value =
+                    (i64::from(current)).clamp(i64::from(min), i64::from(max)) as i32;
                 self.param_state.select(None);
                 return;
             }
@@ -726,6 +790,13 @@ impl BindingWizard {
             *self.behavior_state.offset_mut() = 0;
         }
     }
+}
+
+/// Encode a typed numeric parameter. Bindings carry `u32` parameters, so a
+/// range that includes negative values is clamped into the encodable domain
+/// instead of wrapping around.
+fn range_param_value(value: i32, min: i32) -> u32 {
+    u32::try_from(value.max(min).max(0)).unwrap_or(0)
 }
 
 /// Apply the common list-navigation keys. Returns true when the key was used.
@@ -791,7 +862,10 @@ pub fn param_items(
     };
     match desc.kind {
         ParamKind::LayerId => layer_param_items(keymap, filter),
-        ParamKind::HidUsage { .. } => hid_usage_param_items(filter),
+        ParamKind::HidUsage {
+            keyboard_max,
+            consumer_max,
+        } => hid_usage_param_items(filter, keyboard_max, consumer_max),
         ParamKind::Constant(_) => constant_param_items(catalog, behavior_id, stage, filter),
         ParamKind::Range { .. } | ParamKind::Nil => Vec::new(),
     }
@@ -815,9 +889,10 @@ fn layer_param_items(keymap: &Keymap, filter: &str) -> Vec<ParamItem> {
         .collect()
 }
 
-fn hid_usage_param_items(filter: &str) -> Vec<ParamItem> {
+fn hid_usage_param_items(filter: &str, keyboard_max: u32, consumer_max: u32) -> Vec<ParamItem> {
     keycodes::search(filter)
         .into_iter()
+        .filter(|keycode| hid_usage_is_valid(keycode, keyboard_max, consumer_max))
         .map(|keycode| {
             let mut hint = String::new();
             if keycode.name != keycode.label {
@@ -832,6 +907,31 @@ fn hid_usage_param_items(filter: &str) -> Vec<ParamItem> {
             }
         })
         .collect()
+}
+
+/// Mirror the firmware's `validate_hid_usage` so the picker only offers values
+/// the device accepts: keyboard usages up to the advertised maximum (plus the
+/// modifier block), consumer usages up to the consumer maximum, and nothing
+/// from other HID usage pages.
+fn hid_usage_is_valid(keycode: &keycodes::Keycode, keyboard_max: u32, consumer_max: u32) -> bool {
+    match keycode.page {
+        keycodes::KEYBOARD_PAGE => {
+            let id = u32::from(keycode.id);
+            // `0` is "no key"; the firmware rejects it. Without advertised
+            // metadata fall back to the highest valid keyboard usage.
+            if id == 0 {
+                return false;
+            }
+            let limit = if keyboard_max == 0 {
+                0xE7
+            } else {
+                keyboard_max
+            };
+            id <= limit || (0xE0..=0xE7).contains(&id)
+        }
+        keycodes::CONSUMER_PAGE => consumer_max == 0 || u32::from(keycode.id) <= consumer_max,
+        _ => false,
+    }
 }
 
 fn constant_param_items(
@@ -1225,6 +1325,220 @@ mod tests {
         modal.renaming.as_mut().unwrap().value.clear();
         assert!(modal.handle_key(key(KeyCode::Enter), &keymap).is_none());
         assert!(modal.renaming.is_none());
+    }
+
+    fn catalog_with_hid_limits(keyboard_max: u32, consumer_max: u32) -> Catalog {
+        let mut catalog = Catalog::default();
+        catalog.insert(Behavior {
+            id: KEY_PRESS,
+            display_name: "Key Press".into(),
+            metadata: vec![ParamSet {
+                param1: vec![desc(
+                    "Key",
+                    ParamKind::HidUsage {
+                        keyboard_max,
+                        consumer_max,
+                    },
+                )],
+                param2: vec![],
+            }],
+        });
+        catalog
+    }
+
+    fn keymap_with(max_layer_name_length: usize, available_layers: u32) -> Keymap {
+        Keymap {
+            layers: vec![Layer {
+                id: 0,
+                name: "Base".into(),
+                bindings: vec![Binding::default()],
+            }],
+            available_layers,
+            max_layer_name_length,
+        }
+    }
+
+    #[test]
+    fn hid_usage_picker_honours_advertised_maxima() {
+        let keymap = keymap();
+        let catalog = catalog_with_hid_limits(0xE7, 0x29D);
+
+        let items = param_items(&keymap, &catalog, KEY_PRESS, Stage::Param1, "");
+        let values: Vec<u32> = items.iter().map(|item| item.value).collect();
+
+        assert!(values.contains(&0x0007_0004), "letter A is valid");
+        assert!(
+            values.contains(&0x0007_00E1),
+            "modifier usages stay selectable"
+        );
+
+        // Firmware rejects keyboard usages above the modifier block and
+        // consumer usages above the advertised consumer maximum.
+        let rejected_keyboard = crate::keycodes::by_page_id(0x07, 0xE8)
+            .or_else(|| crate::keycodes::by_page_id(0x07, 0xFB));
+        if let Some(rejected) = rejected_keyboard {
+            assert!(!values.contains(&rejected.value), "{}", rejected.name);
+        }
+        let rejected_consumer = crate::keycodes::by_page_id(0x0C, 0x29F);
+        if let Some(rejected) = rejected_consumer {
+            assert!(!values.contains(&rejected.value), "{}", rejected.name);
+        }
+
+        // A narrower keyboard maximum also hides high function keys.
+        let narrow = catalog_with_hid_limits(0x67, 0x29D);
+        let items = param_items(&keymap, &narrow, KEY_PRESS, Stage::Param1, "f13");
+        assert!(
+            items.iter().all(|item| item.value != 0x0007_0068),
+            "F13 is out of range for a 0x67 keyboard maximum"
+        );
+        // ... but a wider maximum offers them.
+        let wide = catalog_with_hid_limits(0xE7, 0x29D);
+        assert!(
+            param_items(&keymap, &wide, KEY_PRESS, Stage::Param1, "f13")
+                .iter()
+                .any(|item| item.value == 0x0007_0068)
+        );
+    }
+
+    #[test]
+    fn layer_rename_uses_the_firmware_buffer_size() {
+        let keymap = keymap_with(8, 0);
+        let mut modal = LayerModal::new(0, keymap.layers.len());
+        assert!(modal.handle_key(key(KeyCode::Char('r')), &keymap).is_none());
+        assert_eq!(modal.renaming.as_ref().unwrap().max_len, 7);
+        for ch in "0123456789".chars() {
+            modal.handle_key(key(KeyCode::Char(ch)), &keymap);
+        }
+        assert_eq!(modal.renaming.as_ref().unwrap().value.len(), 7);
+
+        // Firmware without name storage advertises 0 and cannot rename.
+        let no_names = keymap_with(0, 0);
+        let mut modal = LayerModal::new(0, no_names.layers.len());
+        assert!(matches!(
+            modal.handle_key(key(KeyCode::Char('r')), &no_names),
+            Some(UiAction::Notice(_))
+        ));
+        assert!(modal.renaming.is_none());
+    }
+
+    #[test]
+    fn layer_list_blocks_full_and_empty_slot_operations() {
+        let full = keymap_with(32, 0);
+        let mut modal = LayerModal::new(0, full.layers.len());
+        assert!(matches!(
+            modal.handle_key(key(KeyCode::Char('a')), &full),
+            Some(UiAction::Notice(_))
+        ));
+
+        let mut single = keymap_with(32, 5);
+        single.layers[0].name = "Only".into();
+        let mut modal = LayerModal::new(0, 1);
+        assert!(matches!(
+            modal.handle_key(key(KeyCode::Char('x')), &single),
+            Some(UiAction::Notice(_))
+        ));
+    }
+
+    fn range_catalog(min: i32, max: i32) -> Catalog {
+        let mut catalog = Catalog::default();
+        catalog.insert(Behavior {
+            id: RANGE,
+            display_name: "Custom Range".into(),
+            metadata: vec![ParamSet {
+                param1: vec![desc("Amount", ParamKind::Range { min, max })],
+                param2: vec![],
+            }],
+        });
+        catalog
+    }
+
+    #[test]
+    fn negative_range_parameters_never_wrap_into_huge_values() {
+        let catalog = range_catalog(-5, 5);
+        let keymap = keymap();
+        let mut wizard = wizard();
+        wizard.behavior = RANGE;
+        wizard.stage = Stage::Param1;
+        wizard.init_param_stage(&keymap, &catalog, Stage::Param1);
+
+        for _ in 0..6 {
+            wizard.handle_key(key(KeyCode::Down), &keymap, &catalog);
+        }
+        assert!(wizard.range_value < 0);
+        assert_eq!(
+            wizard.param1, 0,
+            "u32 bindings cannot represent negative parameters"
+        );
+        wizard.handle_key(key(KeyCode::Enter), &keymap, &catalog);
+        assert_eq!(wizard.param1, 0);
+        assert_eq!(wizard.stage, Stage::Review);
+    }
+
+    #[test]
+    fn range_backspace_keeps_display_and_value_in_sync() {
+        let catalog = range_catalog(2, 100);
+        let keymap = keymap();
+        let mut wizard = wizard();
+        wizard.behavior = RANGE;
+        wizard.stage = Stage::Param1;
+        wizard.init_param_stage(&keymap, &catalog, Stage::Param1);
+        wizard.range_value = 100;
+
+        wizard.handle_key(key(KeyCode::Backspace), &keymap, &catalog);
+        wizard.handle_key(key(KeyCode::Backspace), &keymap, &catalog);
+        assert_eq!(wizard.range_value, 2);
+        assert_eq!(wizard.param1, 2, "the committed value matches the display");
+
+        wizard.handle_key(key(KeyCode::Enter), &keymap, &catalog);
+        assert_eq!(wizard.param1, 2);
+    }
+
+    #[test]
+    fn layout_modal_clamps_selection_to_the_layout_count() {
+        let mut modal = LayoutModal::new(1, 2);
+        for _ in 0..5 {
+            modal.handle_key(key(KeyCode::Down));
+        }
+        assert_eq!(modal.state.selected(), Some(1));
+        for _ in 0..5 {
+            modal.handle_key(key(KeyCode::Up));
+        }
+        assert_eq!(modal.state.selected(), Some(0));
+
+        let mut empty = LayoutModal::new(0, 0);
+        assert!(empty.handle_key(key(KeyCode::Down)).is_none());
+        assert!(empty.handle_key(key(KeyCode::Enter)).is_none());
+        assert!(matches!(
+            empty.handle_key(key(KeyCode::Esc)),
+            Some(UiAction::Close)
+        ));
+    }
+
+    #[test]
+    fn binding_wizard_applies_to_the_layer_it_was_opened_on() {
+        let keymap = keymap();
+        let catalog = catalog();
+        let mut wizard = BindingWizard::new(&keymap, &catalog, 1, 0);
+        assert_eq!(wizard.layer_id, 7);
+        wizard.stage = Stage::Review;
+
+        // Layers reordered while the wizard is open: the stored layer ID keeps
+        // the edit on the layer the user was shown.
+        let mut reordered = keymap.clone();
+        reordered.layers.swap(0, 1);
+        assert!(matches!(
+            wizard.handle_key(key(KeyCode::Enter), &reordered, &catalog),
+            Some(UiAction::ApplyBinding { layer_id: 7, .. })
+        ));
+
+        // If that layer disappears, the wizard refuses instead of writing to a
+        // different layer.
+        let mut removed = keymap.clone();
+        removed.layers.remove(1);
+        assert!(matches!(
+            wizard.handle_key(key(KeyCode::Enter), &removed, &catalog),
+            Some(UiAction::Notice(_))
+        ));
     }
 
     #[test]

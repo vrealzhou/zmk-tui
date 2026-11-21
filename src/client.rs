@@ -111,6 +111,12 @@ impl StudioClient {
         self.inner.state.read().await.lock
     }
 
+    /// Non-blocking variant used from synchronous UI handlers. Returns `None`
+    /// when the state lock is momentarily held by another task.
+    pub fn try_cached_lock_state(&self) -> Option<Option<LockState>> {
+        self.inner.state.try_read().ok().map(|state| state.lock)
+    }
+
     pub async fn cached_unsaved_changes(&self) -> Option<bool> {
         self.inner.state.read().await.unsaved
     }
@@ -123,6 +129,11 @@ impl StudioClient {
         &self,
         subsystem: zmk::studio::request::Subsystem,
     ) -> Result<zmk::studio::RequestResponse, StudioError> {
+        if !self.inner.state.read().await.connected {
+            return Err(StudioError::Disconnected(
+                "the connection is no longer open".into(),
+            ));
+        }
         let _serialised = self.inner.request_lock.lock().await;
 
         let request_id = self.inner.next_request_id.fetch_add(1, Ordering::Relaxed);
@@ -574,7 +585,9 @@ impl StudioClient {
             zmk::keymap::response::ResponseType::SetActivePhysicalLayout(result) => {
                 match result.result {
                     Some(zmk::keymap::set_active_physical_layout_response::Result::Ok(keymap)) => {
-                        self.set_unsaved(true).await;
+                        // The firmware only marks the keymap dirty and raises a
+                        // notification when the selection actually changed, so
+                        // the client must not assume an edit here.
                         Ok(convert_keymap(keymap))
                     }
                     Some(zmk::keymap::set_active_physical_layout_response::Result::Err(code)) => {
@@ -648,10 +661,8 @@ async fn read_loop(
                 }
             }
             Err(error) => {
-                let mut state = inner_ref.state.write().await;
-                state.connected = false;
-                drop(state);
-                let _ = inner_ref.events.send(StudioEvent::Disconnected(error));
+                fail_pending(&inner_ref).await;
+                mark_disconnected(&inner_ref, error).await;
                 return;
             }
         }
@@ -660,12 +671,21 @@ async fn read_loop(
     let Some(inner) = inner.upgrade() else {
         return;
     };
+    fail_pending(&inner).await;
+    mark_disconnected(&inner, "connection closed".into()).await;
+}
+
+/// Drop every waiting response so in-flight requests fail immediately instead
+/// of waiting out the full request timeout on a dead connection.
+async fn fail_pending(inner: &Inner) {
+    inner.pending.lock().await.clear();
+}
+
+async fn mark_disconnected(inner: &Inner, reason: String) {
     let mut state = inner.state.write().await;
     state.connected = false;
     drop(state);
-    let _ = inner
-        .events
-        .send(StudioEvent::Disconnected("connection closed".into()));
+    let _ = inner.events.send(StudioEvent::Disconnected(reason));
 }
 
 async fn handle_notification(notification: zmk::studio::Notification, inner: &Inner) {

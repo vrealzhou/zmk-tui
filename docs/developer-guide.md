@@ -156,7 +156,10 @@ After the transport is established, the client queries:
 Binding edits go through `keymap.set_layer_binding`; changes are live but only
 persist after `keymap.save_changes`. Layer and layout operations use the
 corresponding `keymap.*` requests. `discard_changes` restores the last saved
-settings, not the compiled keymap.
+settings, not the compiled keymap; because the firmware also reverts its
+physical-layout selection, the app refreshes the keymap *and* the physical
+layouts afterwards. A failed snapshot load is retried (up to five times, one
+second apart) before the app gives up and asks the user to retry with `u`.
 
 ## Layout detection
 
@@ -165,7 +168,10 @@ Layout selection comes from the firmware, not from a fixed board list:
 - `keymap.get_keymap` supplies layers and bindings;
 - `keymap.get_physical_layouts` supplies key geometry and display names;
 - the active layout's geometry drives drawing and directional navigation;
-- `p` lists/switches layouts via `set_active_physical_layout`;
+- `p` lists/switches layouts via `set_active_physical_layout`; selecting the
+  already-active layout is a no-op and does not mark the keymap unsaved;
+- the behavior picker filters HID-usage parameters by the device-advertised
+  `keyboard_max` / `consumer_max`, mirroring the firmware's validation;
 - firmware without the layout RPC, or with zero layouts, falls back to a
   generic 10-column grid while remaining editable.
 
@@ -238,7 +244,7 @@ cargo clippy --all-targets
 cargo fmt --check
 ```
 
-The suite contains 99 Rust unit/integration tests plus 4 Gherkin scenarios
+The suite contains 124 Rust unit/integration tests plus 4 Gherkin scenarios
 (31 steps). Test targets:
 
 - library unit tests: framing, keycodes, labels, layout, modal state, mouse

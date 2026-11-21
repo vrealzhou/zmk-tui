@@ -117,7 +117,10 @@ impl MouseMap {
     /// Rectangle of a visible list item, for tests and tooling.
     pub fn item_rect(&self, kind: ListKind, index: usize) -> Option<Rect> {
         let list = self.list(kind)?;
-        if index < list.offset || index >= list.offset + list.area.height as usize {
+        if index < list.offset
+            || index >= list.len
+            || index >= list.offset + list.area.height as usize
+        {
             return None;
         }
         Some(Rect {
@@ -197,6 +200,15 @@ mod tests {
             Some(Rect::new(0, 6, 20, 1))
         );
         assert_eq!(map.item_rect(ListKind::Behaviors, 1), None);
+        assert_eq!(
+            map.item_rect(ListKind::Behaviors, 6),
+            Some(Rect::new(0, 8, 20, 1))
+        );
+        assert_eq!(
+            map.item_rect(ListKind::Behaviors, 10),
+            None,
+            "slots past the list length have no item"
+        );
         assert_eq!(map.list_at(0, 6), Some(ListKind::Behaviors));
     }
 
