@@ -176,3 +176,21 @@ fn friendly(error: &StudioError) -> String {
         other => other.to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn friendly_errors_name_lock_and_rpc_support() {
+        assert_eq!(
+            friendly(&StudioError::UnlockRequired),
+            "the keyboard is locked"
+        );
+        assert!(friendly(&StudioError::RpcNotFound).contains("does not support"));
+        assert_eq!(
+            friendly(&StudioError::Timeout),
+            StudioError::Timeout.to_string()
+        );
+    }
+}

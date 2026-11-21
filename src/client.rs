@@ -889,3 +889,95 @@ fn convert_param(param: zmk::behaviors::BehaviorParameterValueDescription) -> Pa
         kind,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wrong_subsystem() -> zmk::studio::RequestResponse {
+        zmk::studio::RequestResponse {
+            request_id: 7,
+            subsystem: Some(zmk::studio::request_response::Subsystem::Meta(
+                Default::default(),
+            )),
+        }
+    }
+
+    #[test]
+    fn subsystem_errors_name_all_variants() {
+        let cases = [
+            (
+                zmk::studio::request_response::Subsystem::Meta(Default::default()),
+                "meta",
+            ),
+            (
+                zmk::studio::request_response::Subsystem::Core(Default::default()),
+                "core",
+            ),
+            (
+                zmk::studio::request_response::Subsystem::Behaviors(Default::default()),
+                "behaviors",
+            ),
+            (
+                zmk::studio::request_response::Subsystem::Keymap(Default::default()),
+                "keymap",
+            ),
+        ];
+        for (subsystem, name) in cases {
+            let error = unexpected_subsystem(&subsystem);
+            assert!(
+                matches!(error, StudioError::Unexpected(ref message) if message.contains(name)),
+                "{error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn response_parsers_reject_the_wrong_subsystem() {
+        for error in [
+            core_response(wrong_subsystem()).unwrap_err(),
+            keymap_response(wrong_subsystem()).unwrap_err(),
+            behavior_response(wrong_subsystem()).unwrap_err(),
+        ] {
+            assert!(
+                matches!(error, StudioError::Unexpected(ref message) if message.contains("meta")),
+                "{error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn response_parsers_reject_empty_responses() {
+        let empty = zmk::studio::RequestResponse {
+            request_id: 1,
+            subsystem: None,
+        };
+        assert!(matches!(
+            core_response(empty.clone()),
+            Err(StudioError::Protocol(_))
+        ));
+        assert!(matches!(
+            keymap_response(empty.clone()),
+            Err(StudioError::Protocol(_))
+        ));
+        assert!(matches!(
+            behavior_response(empty),
+            Err(StudioError::Protocol(_))
+        ));
+    }
+
+    #[test]
+    fn unexpected_response_helpers_include_kind_and_payload() {
+        for error in [
+            unexpected_core(&zmk::core::response::ResponseType::GetLockState(0)),
+            unexpected_keymap(&zmk::keymap::response::ResponseType::CheckUnsavedChanges(
+                false,
+            )),
+            unexpected_behavior(&zmk::behaviors::response::ResponseType::ListAllBehaviors(
+                Default::default(),
+            )),
+        ] {
+            assert!(matches!(error, StudioError::Unexpected(_)));
+        }
+    }
+}

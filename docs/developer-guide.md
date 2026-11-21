@@ -238,7 +238,7 @@ cargo clippy --all-targets
 cargo fmt --check
 ```
 
-The suite contains 93 Rust unit/integration tests plus 4 Gherkin scenarios
+The suite contains 99 Rust unit/integration tests plus 4 Gherkin scenarios
 (31 steps). Test targets:
 
 - library unit tests: framing, keycodes, labels, layout, modal state, mouse
@@ -269,7 +269,8 @@ It runs, in order:
 2. unit tests (`--lib`, `--bins`);
 3. integration tests (`tests/client.rs`, `tests/tui.rs`, `tests/cucumber.rs`);
 4. coverage + CRAP budgets:
-   - exclude `src/transport/**`, `src/main.rs`, `src/tui/mod.rs`;
+   - exclude `src/transport/**`, `src/main.rs`, `src/tui/mod.rs`,
+     `src/verification.rs` (Kani-only code is not part of runtime coverage);
    - CRAP > 30: **0**;
    - CRAP > 100: **0**;
    - line coverage: **≥ 79%**;
@@ -291,13 +292,31 @@ uploaded even when the gate fails.
 ```bash
 cargo llvm-cov --all-targets --json --output-path /tmp/coverage.json
 PYTHONPATH=/tmp/zmk-py python3 tools/crap.py /tmp/coverage.json \
-  --top 30 --output docs/crap-report.md
+  --exclude 'src/verification.rs' --top 30 --output docs/crap-report.md
 ```
 
 See [crap-baseline.md](crap-baseline.md), [crap-report.md](crap-report.md) and
 [crap-summary.md](crap-summary.md). The current high-CRAP remainder is mostly
 FFI/OS/entry code and large dispatch functions; it is documented rather than
 hidden by coverage exclusions.
+
+#### Why some functions show 0% coverage
+
+`cargo llvm-cov` only records code executed by the test process. The remaining
+runtime zeros are OS/hardware/entry code:
+
+- BLE/Serial: `connect`, `scan`, `adapter`, `send`, `spawn_reader`;
+- terminal/entry: `run`, `run_loop`, `spawn_input_thread`;
+- CLI discovery: `list_devices`;
+- hardware-spawning selectors: `connect_choice`, `connect_by_bluetooth_name`.
+
+Tests deliberately use `Connection::duplex` and `TestBackend`, so no hardware
+is touched. These files are excluded from the CRAP gate. Kani-only code
+(`src/verification.rs`) and `#[cfg(test)]` modules are also filtered from the
+runtime report, so they cannot masquerade as uncovered production code. The
+report labels each remaining 0% row either as **Glue** (hardware/terminal/entry
+point) or as an **unclassified test gap** (low-CRAP accessors and rendering
+edge cases); the latter are normal candidates for future unit tests.
 
 ### Mutation testing
 

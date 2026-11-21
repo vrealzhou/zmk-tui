@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import json
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +48,43 @@ class Function:
     @property
     def crap(self) -> float:
         return self.complexity**2 * (1.0 - self.coverage) ** 3 + self.complexity
+
+
+# Functions that cannot execute in unit/integration tests because they own a
+# hardware, terminal or process entry point. They are listed in the report so a
+# 0% row is not mistaken for a missing unit test.
+GLUE_NOTES = {
+    ("src/main.rs", "main"): "process entry point",
+    ("src/main.rs", "list_devices"): "CLI device discovery",
+    ("src/transport/ble.rs", "debug"): "opt-in BLE diagnostic output",
+    ("src/transport/ble.rs", "adapter"): "BLE adapter creation",
+    ("src/transport/ble.rs", "scan"): "BLE scan",
+    ("src/transport/ble.rs", "connect"): "BLE/CoreBluetooth connection",
+    ("src/transport/ble.rs", "drop"): "GATT teardown hook",
+    ("src/transport/ble.rs", "send"): "BLE characteristic write",
+    ("src/transport/serial.rs", "list_usb_devices"): "OS serial enumeration",
+    ("src/transport/serial.rs", "connect"): "OS serial open",
+    ("src/transport/serial.rs", "spawn_reader"): "USB serial reader thread",
+    ("src/transport/serial.rs", "spawn_writer"): "USB serial writer thread",
+    ("src/transport/serial.rs", "send"): "serial channel write",
+    ("src/tui/app.rs", "refresh_usb"): "device discovery side effect",
+    ("src/tui/app.rs", "spawn_connect"): "connection task",
+    ("src/tui/app.rs", "spawn_bluetooth_by_name"): "connection task",
+    ("src/tui/app.rs", "spawn_bluetooth_scan"): "scan task",
+    ("src/tui/app.rs", "handle_disconnect"): "device disconnect teardown",
+    ("src/tui/connection.rs", "scan_bluetooth"): "BLE scan",
+    ("src/tui/connection.rs", "connect_choice"): "hardware connection dispatch",
+    ("src/tui/connection.rs", "connect_by_bluetooth_name"): "hardware connection dispatch",
+    ("src/tui/mod.rs", "run"): "terminal entry point",
+    ("src/tui/mod.rs", "run_loop"): "terminal event loop",
+    ("src/tui/mod.rs", "spawn_input_thread"): "terminal input thread",
+}
+
+
+def glue_note(function: Function) -> str | None:
+    if function.coverage == 0.0:
+        return GLUE_NOTES.get((function.file, function.name))
+    return None
 
 
 def load_coverage(
@@ -96,6 +134,32 @@ def function_coverage(
     return max(candidates, default=0.0)
 
 
+def test_module_ranges(source: Path) -> list[tuple[int, int]]:
+    """Return line ranges of top-level #[cfg(test)] modules."""
+    lines = source.read_text().splitlines()
+    ranges: list[tuple[int, int]] = []
+    index = 0
+    while index < len(lines):
+        if lines[index].strip() != "#[cfg(test)]":
+            index += 1
+            continue
+        cursor = index + 1
+        while cursor < len(lines) and (
+            not lines[cursor].strip() or lines[cursor].strip().startswith("#[")
+        ):
+            cursor += 1
+        if cursor >= len(lines) or not re.match(r"\s*mod\s+\w+\s*\{", lines[cursor]):
+            index += 1
+            continue
+        for end in range(cursor + 1, len(lines)):
+            if lines[end] == "}":
+                ranges.append((cursor + 1, end + 1))
+                index = end
+                break
+        index += 1
+    return ranges
+
+
 def collect(
     root: Path, coverage_path: Path, excludes: tuple[str, ...] = ()
 ) -> list[Function]:
@@ -107,9 +171,12 @@ def collect(
             continue
         analysis = lizard.analyze_file(str(source))
         records = coverage.get(str(source.resolve()), [])
+        test_ranges = test_module_ranges(source)
         for item in analysis.function_list:
             name = item.name
             if name.startswith("test_") or name.startswith("prop_"):
+                continue
+            if any(start <= item.start_line <= end for start, end in test_ranges):
                 continue
             line = item.start_line
             end = item.end_line
@@ -135,15 +202,49 @@ def render(functions: list[Function], top: int, line_coverage: float) -> str:
         "Coverage is region coverage excluding the function-entry region.",
         f"Total line coverage: **{line_coverage:.2f}%**.",
         "",
-        "| CRAP | Function | File:line | Complexity | Coverage |",
-        "| ---: | --- | --- | ---: | ---: |",
+        "| CRAP | Function | File:line | Complexity | Coverage | Note |",
+        "| ---: | --- | --- | ---: | ---: | --- |",
     ]
     for function in ranked[:top]:
+        note = glue_note(function)
+        if function.coverage == 0.0 and note is None:
+            note = "**0% — unclassified test gap**"
         lines.append(
             f"| {function.crap:.2f} | `{function.name}` | "
             f"`{function.file}:{function.line}` | {function.complexity} | "
-            f"{function.coverage * 100:.1f}% |"
+            f"{function.coverage * 100:.1f}% | {note or ''} |"
         )
+    zero = [function for function in functions if function.coverage == 0.0]
+    glue = [(function, glue_note(function)) for function in zero if glue_note(function)]
+    unclassified = [function for function in zero if glue_note(function) is None]
+    if zero:
+        lines += [
+            "",
+            "## Zero-coverage classification",
+            "",
+            "`cargo llvm-cov` only records code executed in the test process. "
+            "**Glue** rows own a hardware, terminal or process entry point and "
+            "are excluded from the CRAP gate. **Unclassified** rows are not "
+            "glue: they are low-complexity test gaps that can be covered with "
+            "normal unit tests.",
+            "",
+            "**Glue (excluded from the gate):**",
+            "",
+        ]
+        lines += [
+            f"- `{function.name}` (`{function.file}:{function.line}`) — {note}"
+            for function, note in glue
+        ]
+        if unclassified:
+            lines += [
+                "",
+                "**Unclassified 0% functions — not glue; test candidates:**",
+                "",
+            ]
+            lines += [
+                f"- `{function.name}` (`{function.file}:{function.line}`) — CRAP {function.crap:.2f}"
+                for function in unclassified
+            ]
     lines += [
         "",
         f"Functions analysed: {len(functions)}. "

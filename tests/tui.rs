@@ -862,3 +862,19 @@ async fn unlock_modal_enter_starts_a_lock_poll() {
     )
     .await;
 }
+
+#[test]
+fn usb_device_messages_clamp_connect_selection() {
+    let mut app = disconnected_app();
+    app.connect.usb_state.select(Some(9));
+    app.handle(Msg::UsbDevices(vec![UsbDevice {
+        path: "/dev/test0".into(),
+        product: Some("Test Keyboard".into()),
+        manufacturer: None,
+        serial_number: None,
+    }]));
+    assert_eq!(app.connect.usb_state.selected(), Some(0));
+
+    app.handle(Msg::UsbDevices(Vec::new()));
+    assert_eq!(app.connect.usb_state.selected(), None);
+}

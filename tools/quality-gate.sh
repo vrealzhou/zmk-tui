@@ -43,6 +43,7 @@ python3 tools/crap.py target/quality/coverage.json \
   --exclude 'src/transport/*' \
   --exclude 'src/main.rs' \
   --exclude 'src/tui/mod.rs' \
+  --exclude 'src/verification.rs' \
   --max-over-30 0 \
   --max-over-100 0 \
   --min-lines 79 \

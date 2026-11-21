@@ -7,7 +7,7 @@ in [`crap-baseline.md`](crap-baseline.md) and [`crap-report.md`](crap-report.md)
 
 | Metric | Baseline | After |
 | --- | ---: | ---: |
-| Functions analysed | 380 | 425 |
+| Functions analysed | 380 | 352 |
 | CRAP > 30 | 22 | 5 |
 | CRAP > 100 | 7 | 2 |
 
@@ -60,7 +60,14 @@ OS threads and entry points), then enforces:
 
 The excluded functions are still listed in the full report, but they are not
 practical unit-test targets. After the gate-driven refactor the core set has no
-function above CRAP 30.
+function above CRAP 30. The remaining core zeros are the hardware-spawning
+`connect_choice`/`connect_by_bluetooth_name` helpers (CRAP 30) plus a set of
+low-CRAP accessor/rendering helpers; the report labels the former as glue and
+the latter as unclassified unit-test gaps.
+
+The report generator also excludes `#[cfg(test)]` modules and
+`src/verification.rs` (Kani-only code), so test helpers and formal harnesses do
+not appear as bogus 0% runtime functions.
 
 ## Reproduce
 
