@@ -69,6 +69,7 @@ async fn main() -> anyhow::Result<()> {
         simulate: cli.simulate,
         vial,
         scan_vial: true,
+        auto_connect: true,
     })
     .await
 }

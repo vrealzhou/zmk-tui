@@ -44,12 +44,14 @@ keyboards over USB raw HID. Start the in-process demo without hardware:
 cargo run -- --simulate-vial
 ```
 
-Real keyboards are detected automatically on the connect screen: ZMK Studio
-keyboards appear as `ZMK Studio · …` serial ports and Vial keyboards as
-`Vial · …` raw-HID interfaces. Select either row and press Enter; a keyboard
-that exposes both interfaces appears twice, so both standards are available
-from the same connect screen. `--vial` remains available as a shortcut that
-opens the first Vial interface directly.
+Real keyboards are detected automatically: ZMK Studio keyboards appear as
+`ZMK Studio · …` serial ports and Vial keyboards as `Vial · …` raw-HID
+interfaces. When exactly one keyboard is visible, the app connects to it on
+startup using the right protocol — no flag or standard selection needed. If
+several are visible, the connect screen lists them with their standard; select
+a row and press Enter. A keyboard that exposes both interfaces appears twice,
+so both standards are available from the same screen. `--vial` remains as a
+shortcut that opens the first Vial interface directly.
 
 ```bash
 cargo run -- --vial

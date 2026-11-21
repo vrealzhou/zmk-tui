@@ -48,6 +48,9 @@ pub struct StartOptions {
     /// The binary enables this; library tests keep it off so they never probe
     /// host hardware.
     pub scan_vial: bool,
+    /// Connect immediately when exactly one keyboard is visible. The binary
+    /// enables this; tests keep it off for deterministic startup.
+    pub auto_connect: bool,
 }
 
 pub enum Msg {
@@ -278,6 +281,7 @@ pub struct App {
     pub keyboard_viewport: layout::Viewport,
     last_click: Option<(MouseTarget, Instant)>,
     pub start: StartOptions,
+    auto_connect: bool,
     simulator: Option<Simulator>,
     connect_inflight: bool,
     scanning_inflight: bool,
@@ -307,6 +311,7 @@ impl App {
             mouse: MouseMap::default(),
             keyboard_viewport: layout::Viewport::default(),
             last_click: None,
+            auto_connect: start.auto_connect,
             start,
             simulator: None,
             connect_inflight: false,
@@ -358,6 +363,9 @@ impl App {
             return;
         }
         self.refresh_usb();
+        if self.try_auto_connect() {
+            return;
+        }
         self.spawn_bluetooth_scan();
     }
 
@@ -401,6 +409,7 @@ impl App {
                         self.connect.bluetooth = devices;
                         self.connect.scan_error = None;
                         self.clamp_connect_selection();
+                        self.try_auto_connect();
                     }
                     Err(error) => {
                         self.connect.bluetooth.clear();
@@ -1305,6 +1314,48 @@ impl App {
         }
     }
 
+    /// The single keyboard the app may connect to without asking, if any.
+    /// More than one USB/HID candidate is genuinely ambiguous, so the connect
+    /// screen stays up and the user picks.
+    pub fn auto_connect_choice(&self) -> Option<DeviceChoice> {
+        if self.connect.usb.len() == 1 {
+            return Some(self.connect.usb[0].choice());
+        }
+        if !self.connect.usb.is_empty() {
+            return None;
+        }
+        if self.connect.bluetooth.len() == 1 {
+            return Some(DeviceChoice::Bluetooth {
+                device: self.connect.bluetooth[0].clone(),
+            });
+        }
+        let mut connected = self
+            .connect
+            .bluetooth
+            .iter()
+            .filter(|device| device.connected);
+        match (connected.next(), connected.next()) {
+            (Some(device), None) => Some(DeviceChoice::Bluetooth {
+                device: device.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    fn try_auto_connect(&mut self) -> bool {
+        if !self.auto_connect || self.connect_inflight || self.editor.is_some() {
+            return false;
+        }
+        let Some(choice) = self.auto_connect_choice() else {
+            return false;
+        };
+        // One attempt only: a failed automatic connection drops to the connect
+        // list instead of retrying forever in the background.
+        self.auto_connect = false;
+        self.spawn_connect(choice);
+        true
+    }
+
     fn connect_selected(&mut self) {
         let choice = match self.connect.focus {
             Panel::Usb => {
@@ -1339,6 +1390,7 @@ impl App {
         if self.connect_inflight {
             return;
         }
+        self.auto_connect = false;
         self.connect_inflight = true;
         self.busy = Some(format!(
             "Connecting to {} · {}…",

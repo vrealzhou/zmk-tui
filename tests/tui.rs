@@ -1345,3 +1345,42 @@ fn connect_screen_labels_studio_and_vial_rows() {
         DeviceChoice::Vial { .. }
     ));
 }
+
+#[test]
+fn auto_connect_only_when_exactly_one_keyboard_is_visible() {
+    let mut app = disconnected_app();
+    app.connect.usb = Vec::new();
+    assert!(app.auto_connect_choice().is_none());
+
+    app.connect.usb = vec![UsbEntry::Vial(VialDeviceInfo {
+        name: "Sofle Vial".into(),
+        path: "hid-path".into(),
+        vendor_id: 0x1234,
+        product_id: 0x5678,
+        serial: "vial:f64c2b3c".into(),
+    })];
+    assert!(matches!(
+        app.auto_connect_choice(),
+        Some(DeviceChoice::Vial { .. })
+    ));
+
+    app.connect.usb = vec![
+        UsbEntry::Studio(UsbDevice {
+            path: "/dev/cu.studio".into(),
+            product: Some("Sofle".into()),
+            manufacturer: None,
+            serial_number: None,
+        }),
+        UsbEntry::Vial(VialDeviceInfo {
+            name: "Sofle Vial".into(),
+            path: "hid-path".into(),
+            vendor_id: 0x1234,
+            product_id: 0x5678,
+            serial: "vial:f64c2b3c".into(),
+        }),
+    ];
+    assert!(
+        app.auto_connect_choice().is_none(),
+        "two candidates must be left to the user"
+    );
+}
