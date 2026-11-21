@@ -53,3 +53,27 @@ fn encoded_frame_shape_is_well_formed() {
     }
     assert!(!escaped, "dangling escape at end of frame");
 }
+
+/// A fast, allocation-light proof: every reserved byte is escaped when it is
+/// the entire payload. This is the proof used by the quality gate; the larger
+/// round-trip harnesses remain available for a dedicated verification job.
+#[kani::proof]
+fn encode_escapes_each_reserved_single_byte() {
+    let byte: u8 = kani::any();
+    let encoded = encode(&[byte]);
+    match byte {
+        SOF | ESC | EOF => {
+            assert_eq!(encoded.len(), 4);
+            assert_eq!(encoded[0], SOF);
+            assert_eq!(encoded[1], ESC);
+            assert_eq!(encoded[2], byte);
+            assert_eq!(encoded[3], EOF);
+        }
+        _ => {
+            assert_eq!(encoded.len(), 3);
+            assert_eq!(encoded[0], SOF);
+            assert_eq!(encoded[1], byte);
+            assert_eq!(encoded[2], EOF);
+        }
+    }
+}

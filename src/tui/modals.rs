@@ -252,39 +252,49 @@ impl LayerModal {
     }
 
     fn handle_key(&mut self, key: KeyEvent, keymap: &Keymap) -> Option<UiAction> {
-        if let Some(rename) = &mut self.renaming {
-            match key.code {
-                KeyCode::Esc => {
-                    self.renaming = None;
-                }
-                KeyCode::Enter => {
-                    let trimmed = rename.value.trim().to_string();
-                    let layer_id = rename.layer_id;
-                    self.renaming = None;
-                    if trimmed.is_empty() {
-                        return None;
-                    }
-                    return Some(UiAction::RenameLayer {
-                        layer_id,
-                        name: trimmed,
-                    });
-                }
-                KeyCode::Backspace => {
-                    rename.value.pop();
-                }
-                KeyCode::Char(ch)
-                    if !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                        && rename.value.len() + ch.len_utf8() <= rename.max_len =>
-                {
-                    rename.value.push(ch);
-                }
-                _ => {}
-            }
-            return None;
+        if self.renaming.is_some() {
+            return self.handle_rename_key(key);
         }
+        self.handle_layer_list_key(key, keymap)
+    }
 
+    fn handle_rename_key(&mut self, key: KeyEvent) -> Option<UiAction> {
+        let Some(rename) = &mut self.renaming else {
+            return None;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.renaming = None;
+            }
+            KeyCode::Enter => {
+                let trimmed = rename.value.trim().to_string();
+                let layer_id = rename.layer_id;
+                self.renaming = None;
+                if trimmed.is_empty() {
+                    return None;
+                }
+                return Some(UiAction::RenameLayer {
+                    layer_id,
+                    name: trimmed,
+                });
+            }
+            KeyCode::Backspace => {
+                rename.value.pop();
+            }
+            KeyCode::Char(ch)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                    && rename.value.len() + ch.len_utf8() <= rename.max_len =>
+            {
+                rename.value.push(ch);
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn handle_layer_list_key(&mut self, key: KeyEvent, keymap: &Keymap) -> Option<UiAction> {
         let len = keymap.layers.len();
         match key.code {
             KeyCode::Esc => Some(UiAction::Close),
@@ -1200,5 +1210,39 @@ mod tests {
         assert_eq!(state.selected(), None);
         assert!(navigate_list(KeyCode::Down, &mut state, 2));
         assert!(!navigate_list(KeyCode::Char('x'), &mut state, 2));
+    }
+
+    #[test]
+    fn layer_rename_can_be_cancelled_or_left_empty() {
+        let keymap = keymap();
+        let mut modal = LayerModal::new(0, keymap.layers.len());
+        modal.handle_key(key(KeyCode::Char('r')), &keymap);
+        assert!(modal.renaming.is_some());
+        modal.handle_key(key(KeyCode::Esc), &keymap);
+        assert!(modal.renaming.is_none());
+
+        modal.handle_key(key(KeyCode::Char('r')), &keymap);
+        modal.renaming.as_mut().unwrap().value.clear();
+        assert!(modal.handle_key(key(KeyCode::Enter), &keymap).is_none());
+        assert!(modal.renaming.is_none());
+    }
+
+    #[test]
+    fn layer_list_is_safe_with_no_layers() {
+        let empty = Keymap::default();
+        let mut modal = LayerModal::new(0, 0);
+        for code in [
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Home,
+            KeyCode::End,
+            KeyCode::Enter,
+            KeyCode::Char('x'),
+            KeyCode::Char('J'),
+            KeyCode::Char('K'),
+            KeyCode::Char('r'),
+        ] {
+            assert!(modal.handle_key(key(code), &empty).is_none());
+        }
     }
 }

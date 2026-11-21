@@ -7,9 +7,9 @@ in [`crap-baseline.md`](crap-baseline.md) and [`crap-report.md`](crap-report.md)
 
 | Metric | Baseline | After |
 | --- | ---: | ---: |
-| Functions analysed | 380 | 410 |
-| CRAP > 30 | 22 | 12 |
-| CRAP > 100 | 7 | 3 |
+| Functions analysed | 380 | 425 |
+| CRAP > 30 | 22 | 5 |
+| CRAP > 100 | 7 | 2 |
 
 ## Changes
 
@@ -21,10 +21,18 @@ in [`crap-baseline.md`](crap-baseline.md) and [`crap-report.md`](crap-report.md)
 - Added tests for generic/custom binding labels, unknown behaviors, and all
   eight modifier key symbols.
 - Added connect-screen keyboard/mouse tests and a mouse layer-row test.
+- Split `App::handle` into connection/edit/layer message handlers.
+- Split `apply_action` into layer, layout and save/quit helpers.
+- Split `handle_editor_key` into navigation and command handlers.
+- Split `LayerModal::handle_key` into rename and list handlers.
+- Added device-event, lock-poll, connect-list scroll, mouse-wheel navigation,
+  editor-command and quit/unlock action tests.
 
 The removed hotspots were `handle_param_key` (CRAP 204.98 → below the report
 cutoff), `generic_label` (132.00 → covered), and `param_items`
-(75.92 → refactored/covered).
+(75.92 → refactored/covered). The gate-driven split also removed `handle`,
+`apply_action`, `handle_editor_key` and `LayerModal::handle_key` from the
+high-CRAP set.
 
 ## Remaining high-CRAP functions
 
@@ -36,11 +44,23 @@ The remaining top entries are deliberately not “fixed” by weakening tests:
   and terminal I/O.
 - `main::list_devices`, `tui::mod::run/run_loop` — entry points and hardware
   discovery.
-- `tui::app::handle/apply_action/handle_editor_key` — large dispatch functions
-  covered by integration/Gherkin tests; further splitting is possible, but
-  coverage is now the limiting factor, not a lack of branches.
-- `tui::render` helpers — UI rendering; covered by TestBackend screenshots and
-  manual checks.
+- `tui::render` helpers and exact-CRAP-30 connection helpers — UI/connection
+  code covered by TestBackend and manual checks, not a practical unit target.
+- `tui::app` dispatch functions were split under gate pressure and now fall
+  below the CRAP 30 threshold; their integration/Gherkin coverage is retained.
+
+## Gate policy
+
+The gate excludes `src/transport/**`, `src/main.rs` and `src/tui/mod.rs` (FFI,
+OS threads and entry points), then enforces:
+
+- **CRAP > 30: 0**
+- **CRAP > 100: 0**
+- **line coverage: ≥ 79%**
+
+The excluded functions are still listed in the full report, but they are not
+practical unit-test targets. After the gate-driven refactor the core set has no
+function above CRAP 30.
 
 ## Reproduce
 

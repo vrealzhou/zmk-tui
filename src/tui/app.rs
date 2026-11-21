@@ -301,6 +301,27 @@ impl App {
             Msg::Key(key) => self.handle_key(key),
             Msg::Mouse(mouse) => self.handle_mouse(mouse),
             Msg::Tick => self.on_tick(),
+            message @ (Msg::UsbDevices(_)
+            | Msg::BluetoothDevices(_)
+            | Msg::ConnectResult(_)
+            | Msg::DeviceEvent(_)) => self.handle_connection_message(message),
+            message @ (Msg::Snapshot(_)
+            | Msg::BindingSet { .. }
+            | Msg::Saved { .. }
+            | Msg::Discarded { .. }
+            | Msg::KeymapRefreshed(_)) => self.handle_edit_message(message),
+            message @ (Msg::LayerAdded(_)
+            | Msg::LayerRemoved(_)
+            | Msg::LayerMoved { .. }
+            | Msg::LayerRenamed { .. }
+            | Msg::LayoutChanged { .. }
+            | Msg::LockPolled(_)
+            | Msg::ResetSettings(_)) => self.handle_layer_message(message),
+        }
+    }
+
+    fn handle_connection_message(&mut self, message: Msg) {
+        match message {
             Msg::UsbDevices(devices) => {
                 self.connect.usb = devices;
                 self.clamp_connect_selection();
@@ -323,6 +344,12 @@ impl App {
             }
             Msg::ConnectResult(result) => self.handle_connect_result(result),
             Msg::DeviceEvent(event) => self.handle_device_event(event),
+            _ => unreachable!("only connection messages reach this handler"),
+        }
+    }
+
+    fn handle_edit_message(&mut self, message: Msg) {
+        match message {
             Msg::Snapshot(result) => self.handle_snapshot(result),
             Msg::BindingSet {
                 result,
@@ -391,6 +418,12 @@ impl App {
                 }
                 Err(error) => self.handle_studio_error(error),
             },
+            _ => unreachable!("only edit messages reach this handler"),
+        }
+    }
+
+    fn handle_layer_message(&mut self, message: Msg) {
+        match message {
             Msg::LayerAdded(result) => match result {
                 Ok(index) => {
                     self.pending_layer_select = Some(index as usize);
@@ -468,6 +501,7 @@ impl App {
                 }
                 Err(error) => self.handle_studio_error(error),
             },
+            _ => unreachable!("only layer/session messages reach this handler"),
         }
     }
 
@@ -531,12 +565,15 @@ impl App {
     }
 
     fn handle_editor_key(&mut self, key: KeyEvent) {
-        let layer_count = self
-            .editor
-            .as_ref()
-            .map(|editor| editor.keymap.layers.len())
-            .unwrap_or(0);
+        if self.handle_editor_navigation(key) {
+            return;
+        }
+        self.handle_editor_command(key);
+    }
 
+    /// Movement, layer cycling and numeric layer jumps. Returns true when the
+    /// key was consumed.
+    fn handle_editor_navigation(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Left | KeyCode::Char('h') => self.navigate(Direction::Left),
             KeyCode::Right | KeyCode::Char('l') => self.navigate(Direction::Right),
@@ -545,22 +582,30 @@ impl App {
             KeyCode::Home | KeyCode::Char('g') => self.select_edge(false),
             KeyCode::End | KeyCode::Char('G') => self.select_edge(true),
             KeyCode::Tab | KeyCode::Char(']') => {
-                if key.modifiers.contains(KeyModifiers::SHIFT) {
-                    self.cycle_layer(-1);
+                self.cycle_layer(if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    -1
                 } else {
-                    self.cycle_layer(1);
-                }
+                    1
+                });
             }
             KeyCode::BackTab | KeyCode::Char('[') => self.cycle_layer(-1),
             KeyCode::Char(ch) if ch.is_ascii_digit() => {
                 let index = ch.to_digit(10).unwrap_or(0) as usize;
-                if index < layer_count {
-                    if let Some(editor) = &mut self.editor {
+                if let Some(editor) = &mut self.editor {
+                    if index < editor.keymap.layers.len() {
                         editor.layer_index = index;
                         editor.clamp();
                     }
                 }
             }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Commands that open a modal or act on the whole keymap.
+    fn handle_editor_command(&mut self, key: KeyEvent) {
+        match key.code {
             KeyCode::Enter => self.open_binding_editor(),
             KeyCode::Char('L') => self.open_layer_manager(),
             KeyCode::Char('p') => self.open_layout_picker(),
@@ -775,7 +820,6 @@ impl App {
 
     fn apply_action(&mut self, action: UiAction) {
         match action {
-            UiAction::Close => self.modal = None,
             UiAction::ApplyBinding {
                 layer_id,
                 position,
@@ -786,6 +830,27 @@ impl App {
                     self.spawn_set_binding(layer_id, position, binding);
                 }
             }
+            action @ (UiAction::AddLayer
+            | UiAction::AskRemoveLayer(_)
+            | UiAction::RemoveLayer(_)
+            | UiAction::MoveLayer { .. }
+            | UiAction::RenameLayer { .. }
+            | UiAction::SelectLayer(_)) => self.apply_layer_action(action),
+            UiAction::SetLayout(index) => self.apply_layout_action(index),
+            action @ (UiAction::Save
+            | UiAction::Discard
+            | UiAction::ResetSettings
+            | UiAction::Quit
+            | UiAction::QuitSave
+            | UiAction::QuitDiscard
+            | UiAction::QuitAnyway
+            | UiAction::Close
+            | UiAction::CheckUnlock) => self.apply_session_action(action),
+        }
+    }
+
+    fn apply_layer_action(&mut self, action: UiAction) {
+        match action {
             UiAction::AddLayer => {
                 if self.require_unlocked() {
                     self.modal = None;
@@ -830,21 +895,43 @@ impl App {
                 }
                 self.modal = None;
             }
-            UiAction::SetLayout(index) => {
-                if self.require_unlocked() {
-                    let valid = self
-                        .editor
-                        .as_ref()
-                        .map(|editor| index < editor.layouts.layouts.len())
-                        .unwrap_or(false);
-                    if valid {
-                        self.modal = None;
-                        self.spawn_set_layout(index);
-                    } else {
-                        self.modal = None;
-                    }
-                }
+            _ => unreachable!("only layer actions reach this handler"),
+        }
+    }
+
+    fn apply_layout_action(&mut self, index: usize) {
+        if self.require_unlocked() {
+            let valid = self
+                .editor
+                .as_ref()
+                .map(|editor| index < editor.layouts.layouts.len())
+                .unwrap_or(false);
+            if valid {
+                self.modal = None;
+                self.spawn_set_layout(index);
+            } else {
+                self.modal = None;
             }
+        }
+    }
+
+    fn apply_session_action(&mut self, action: UiAction) {
+        match action {
+            action @ (UiAction::Save | UiAction::Discard | UiAction::ResetSettings) => {
+                self.apply_save_action(action)
+            }
+            action @ (UiAction::Quit
+            | UiAction::QuitSave
+            | UiAction::QuitDiscard
+            | UiAction::QuitAnyway
+            | UiAction::Close
+            | UiAction::CheckUnlock) => self.apply_quit_action(action),
+            _ => unreachable!("only session actions reach this handler"),
+        }
+    }
+
+    fn apply_save_action(&mut self, action: UiAction) {
+        match action {
             UiAction::Save => {
                 if self.require_unlocked() {
                     self.modal = None;
@@ -863,6 +950,12 @@ impl App {
                     self.spawn_reset_settings();
                 }
             }
+            _ => unreachable!("only save/discard/reset actions reach this handler"),
+        }
+    }
+
+    fn apply_quit_action(&mut self, action: UiAction) {
+        match action {
             UiAction::Quit => self.request_quit(),
             UiAction::QuitSave => {
                 if self.require_unlocked() {
@@ -877,12 +970,14 @@ impl App {
                 }
             }
             UiAction::QuitAnyway => self.should_quit = true,
+            UiAction::Close => self.modal = None,
             UiAction::CheckUnlock => {
                 if let Some(Modal::Unlock(unlock)) = &mut self.modal {
                     unlock.waiting = true;
                 }
                 self.spawn_lock_poll();
             }
+            _ => unreachable!("only quit/close/unlock actions reach this handler"),
         }
     }
 

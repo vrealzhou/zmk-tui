@@ -34,11 +34,14 @@ complete input space for a fixed length; unbounded payload length needs a loop
 invariant or a length parameter with a carefully bounded `kani::assume`.
 
 Status: `cargo kani --only-codegen` succeeds for the harness crate (Kani 0.67,
-Rust 1.99). A full CBMC solver run exceeded the local time budget because the
-harnesses use `Vec`/`Vec<Vec<u8>>`; the harnesses are kept as executable proof
-obligations for a dedicated verification job. Treat them as bounded proof
-starting points, not completed proofs, until that job reports `VERIFICATION
-SUCCESSFUL`.
+Rust 1.99), and the quality gate runs
+`encode_escapes_each_reserved_single_byte` to completion:
+`VERIFICATION SUCCESSFUL` in ~1.4s (418 checks). The larger
+`frame_round_trips_arbitrary_payload` and
+`arbitrary_serial_noise_never_panics` harnesses use `Vec`/`Vec<Vec<u8>>`; their
+full CBMC runs exceed the local budget and remain proof obligations for a
+dedicated verification job. Treat those two as bounded proof starting points,
+not completed proofs, until that job reports `VERIFICATION SUCCESSFUL`.
 
 Run them with:
 

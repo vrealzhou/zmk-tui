@@ -1,0 +1,50 @@
+name: quality-gate
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@cargo-mutants
+
+      - name: Install Kani
+        run: |
+          cargo install --locked kani-verifier
+          cargo kani setup
+
+      - name: Install lizard
+        run: python3 -m pip install --user lizard
+
+      - name: Run quality gate
+        run: bash tools/quality-gate.sh
+        env:
+          MUTATION_JOBS: 4
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: quality-gate
+          path: target/quality
+          if-no-files-found: ignore

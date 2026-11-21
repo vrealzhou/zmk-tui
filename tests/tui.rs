@@ -11,11 +11,14 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
+use zmk_tui::client::{StudioError, StudioEvent};
 use zmk_tui::keycodes;
+use zmk_tui::model::LockState;
 use zmk_tui::simulator::SimulatedBoard;
+use zmk_tui::transport::serial::UsbDevice;
 use zmk_tui::tui::StartOptions;
-use zmk_tui::tui::app::{App, Msg, Panel};
-use zmk_tui::tui::modals::{Modal, Stage, behavior_items};
+use zmk_tui::tui::app::{App, Msg, Panel, StatusKind};
+use zmk_tui::tui::modals::{Modal, Stage, UnlockModal, behavior_items};
 use zmk_tui::tui::mouse::{ListKind, MouseTarget};
 use zmk_tui::tui::render;
 
@@ -703,4 +706,159 @@ async fn ticks_advance_without_disturbing_the_editor() {
     app.handle(Msg::Tick);
     assert_eq!(app.tick, before + 1);
     assert!(app.editor.is_some());
+}
+
+#[tokio::test]
+async fn device_events_update_lock_and_dirty_state() {
+    let (mut app, _rx) = connected_app().await;
+    let _ = screen_text(&mut app);
+
+    app.handle(Msg::DeviceEvent(StudioEvent::UnsavedChangesChanged(true)));
+    assert!(app.editor.as_ref().unwrap().dirty);
+
+    app.handle(Msg::DeviceEvent(StudioEvent::LockStateChanged(
+        LockState::Locked,
+    )));
+    assert!(app.editor.as_ref().unwrap().locked);
+    assert!(matches!(app.modal, Some(Modal::Unlock(_))));
+
+    app.handle(Msg::DeviceEvent(StudioEvent::LockStateChanged(
+        LockState::Unlocked,
+    )));
+    assert!(!app.editor.as_ref().unwrap().locked);
+    assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn lock_poll_results_clear_or_set_lock_state() {
+    let (mut app, _rx) = connected_app().await;
+
+    app.handle(Msg::LockPolled(Ok(LockState::Locked)));
+    assert!(app.editor.as_ref().unwrap().locked);
+
+    app.modal = Some(Modal::Unlock(UnlockModal::default()));
+    app.handle(Msg::LockPolled(Ok(LockState::Unlocked)));
+    assert!(!app.editor.as_ref().unwrap().locked);
+    assert!(app.modal.is_none());
+
+    app.handle(Msg::LockPolled(Err(StudioError::Timeout)));
+    assert_eq!(
+        app.status.as_ref().map(|status| status.kind),
+        Some(StatusKind::Error)
+    );
+}
+
+#[test]
+fn mouse_scroll_moves_connect_and_editor_selection() {
+    let mut app = disconnected_app();
+    app.connect.usb = vec![
+        UsbDevice {
+            path: "/dev/test0".into(),
+            product: Some("Test Keyboard".into()),
+            manufacturer: None,
+            serial_number: None,
+        },
+        UsbDevice {
+            path: "/dev/test1".into(),
+            product: Some("Test Keyboard".into()),
+            manufacturer: None,
+            serial_number: None,
+        },
+    ];
+    app.connect.usb_state.select(Some(0));
+    let _ = screen_text(&mut app);
+    scroll_list(&mut app, ListKind::UsbDevices, true);
+    assert_eq!(app.connect.usb_state.selected(), Some(1));
+    scroll_list(&mut app, ListKind::UsbDevices, false);
+    assert_eq!(app.connect.usb_state.selected(), Some(0));
+    assert_eq!(app.connect.focus, Panel::Usb);
+}
+
+#[tokio::test]
+async fn mouse_wheel_navigates_the_keymap_without_a_list_under_it() {
+    let (mut app, _rx) = connected_app().await;
+    let _ = screen_text(&mut app);
+    let target = app
+        .mouse
+        .target_rect(MouseTarget::EditorKey(5))
+        .expect("key target");
+    app.handle(Msg::Mouse(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: target.x + 1,
+        row: target.y + 1,
+        modifiers: KeyModifiers::NONE,
+    }));
+    assert_ne!(app.editor.as_ref().unwrap().selected, 0);
+}
+
+#[tokio::test]
+async fn editor_commands_open_and_close_modals_and_jump_layers() {
+    let (mut app, _rx) = connected_app().await;
+
+    press(&mut app, KeyCode::Char('L'));
+    assert!(matches!(app.modal, Some(Modal::Layers(_))));
+    press(&mut app, KeyCode::Esc);
+    assert!(app.modal.is_none());
+
+    press(&mut app, KeyCode::Char('p'));
+    assert!(matches!(app.modal, Some(Modal::Layouts(_))));
+    press(&mut app, KeyCode::Esc);
+
+    press(&mut app, KeyCode::Char('u'));
+    assert!(matches!(app.modal, Some(Modal::Unlock(_))));
+    press(&mut app, KeyCode::Esc);
+
+    press(&mut app, KeyCode::Char('?'));
+    assert!(matches!(app.modal, Some(Modal::Help)));
+    press(&mut app, KeyCode::Esc);
+
+    press(&mut app, KeyCode::Char('R'));
+    assert!(matches!(app.modal, Some(Modal::Confirm(_))));
+    press(&mut app, KeyCode::Esc);
+
+    press(&mut app, KeyCode::Char('d'));
+    assert!(matches!(app.modal, Some(Modal::Confirm(_))));
+    press(&mut app, KeyCode::Esc);
+
+    press(&mut app, KeyCode::Char(']'));
+    assert_eq!(app.editor.as_ref().unwrap().layer_index, 1);
+    press(&mut app, KeyCode::Char('['));
+    assert_eq!(app.editor.as_ref().unwrap().layer_index, 0);
+    press(&mut app, KeyCode::Char('9'));
+    assert_eq!(app.editor.as_ref().unwrap().layer_index, 0);
+}
+
+#[tokio::test]
+async fn quit_confirmation_can_save_then_quit() {
+    let (mut app, mut rx) = connected_app().await;
+    app.editor.as_mut().unwrap().dirty = true;
+    press(&mut app, KeyCode::Char('q'));
+    assert!(matches!(app.modal, Some(Modal::Confirm(_))));
+    press(&mut app, KeyCode::Char('s'));
+    pump_until(&mut app, &mut rx, "save then quit", |app| app.should_quit).await;
+}
+
+#[tokio::test]
+async fn quit_confirmation_can_quit_anyway() {
+    let (mut app, _rx) = connected_app().await;
+    app.editor.as_mut().unwrap().dirty = true;
+    press(&mut app, KeyCode::Char('q'));
+    press(&mut app, KeyCode::Char('q'));
+    assert!(app.should_quit);
+}
+
+#[tokio::test]
+async fn unlock_modal_enter_starts_a_lock_poll() {
+    let (mut app, mut rx) = connected_app().await;
+    press(&mut app, KeyCode::Char('u'));
+    assert!(matches!(&app.modal, Some(Modal::Unlock(unlock)) if !unlock.waiting));
+    press(&mut app, KeyCode::Enter);
+    assert!(matches!(&app.modal, Some(Modal::Unlock(unlock)) if unlock.waiting));
+    pump_until(
+        &mut app,
+        &mut rx,
+        "unlock poll",
+        |app| !matches!(&app.modal, Some(Modal::Unlock(unlock)) if unlock.waiting),
+    )
+    .await;
 }

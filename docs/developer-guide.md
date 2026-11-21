@@ -238,7 +238,7 @@ cargo clippy --all-targets
 cargo fmt --check
 ```
 
-The suite contains 83 Rust unit/integration tests plus 4 Gherkin scenarios
+The suite contains 93 Rust unit/integration tests plus 4 Gherkin scenarios
 (31 steps). Test targets:
 
 - library unit tests: framing, keycodes, labels, layout, modal state, mouse
@@ -250,6 +250,39 @@ The suite contains 83 Rust unit/integration tests plus 4 Gherkin scenarios
 
 The simulator implements the same wire protocol, lock state, notifications,
 save/discard and layer operations as the firmware.
+
+### Quality gate
+
+The local/CI gate is [`../tools/quality-gate.sh`](../tools/quality-gate.sh).
+Prerequisites: `cargo-llvm-cov`, `cargo-mutants`, Kani and
+`python3 -m pip install lizard`.
+
+```bash
+bash tools/quality-gate.sh
+# Skip only the slow mutation stage while iterating:
+SKIP_MUTATION=1 bash tools/quality-gate.sh
+```
+
+It runs, in order:
+
+1. `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`;
+2. unit tests (`--lib`, `--bins`);
+3. integration tests (`tests/client.rs`, `tests/tui.rs`, `tests/cucumber.rs`);
+4. coverage + CRAP budgets:
+   - exclude `src/transport/**`, `src/main.rs`, `src/tui/mod.rs`;
+   - CRAP > 30: **0**;
+   - CRAP > 100: **0**;
+   - line coverage: **≥ 79%**;
+5. formal verification: Kani codegen for all harnesses plus the fast
+   `encode_escapes_each_reserved_single_byte` proof;
+6. mutation testing: frame codec, mutation score **≥ 90%** (currently 19/20,
+   the survivor being an equivalent allocation-size mutant).
+
+CI runs the same gate in
+[`../.github/workflows/quality-gate.yml`](../.github/workflows/quality-gate.yml)
+on macOS, installing `cargo-llvm-cov`, `cargo-mutants` and Kani. Artifacts
+(`target/quality/coverage.json`, `crap-report.md`, mutation outcomes) are
+uploaded even when the gate fails.
 
 ### CRAP and coverage
 
@@ -285,9 +318,10 @@ cargo kani --harness arbitrary_serial_noise_never_panics
 cargo kani --harness encoded_frame_shape_is_well_formed
 ```
 
-The harness crate passes `cargo kani --only-codegen`. Full CBMC runs exceed the
-local time budget on the allocation-heavy harnesses; they are proof obligations
-for a dedicated verification job. See
+The harness crate passes `cargo kani --only-codegen`, and the fast
+`encode_escapes_each_reserved_single_byte` proof passes in the quality gate
+(1.4s, 418 checks). Full round-trip/noise CBMC runs exceed the local time budget;
+they remain proof obligations for a dedicated verification job. See
 [formal-verification.md](formal-verification.md) for the Kani/Prusti/Creusot/
 TLA+ candidate map and limitations.
 
