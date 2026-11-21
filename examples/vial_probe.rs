@@ -9,8 +9,8 @@
 //! Real keyboard (read-only):
 //!
 //! ```bash
-//! cargo run --features vial-hid --example vial_probe -- --real --list
-//! cargo run --features vial-hid --example vial_probe -- --real
+//! cargo run --example vial_probe -- --real --list
+//! cargo run --example vial_probe -- --real
 //! ```
 //!
 //! `--write-test` writes the existing keycode back to layer 0, position 0
@@ -172,83 +172,67 @@ fn print_layer<T: RawHid>(keyboard: &VialKeyboard<T>, layer: usize, count: usize
 }
 
 fn list() -> Result<(), String> {
-    #[cfg(feature = "vial-hid")]
-    {
-        let devices = zmk_tui::vial::transport::list().map_err(|error| error.to_string())?;
-        if devices.is_empty() {
-            println!("No raw-HID interfaces (usage page 0xFF60 / usage 0x61) found.");
-        }
-        for device in devices {
-            println!(
-                "  {:04X}:{:04X} {} vial={} serial={:?} path={}",
-                device.vendor_id,
-                device.product_id,
-                device.product,
-                device.is_vial,
-                device.serial,
-                device.path
-            );
-        }
-        Ok(())
+    let devices = zmk_tui::vial::transport::list().map_err(|error| error.to_string())?;
+    if devices.is_empty() {
+        println!("No raw-HID interfaces (usage page 0xFF60 / usage 0x61) found.");
     }
-    #[cfg(not(feature = "vial-hid"))]
-    {
-        Err("built without the `vial-hid` feature; rerun with --features vial-hid".into())
+    for device in devices {
+        println!(
+            "  {:04X}:{:04X} {} vial={} serial={:?} path={}",
+            device.vendor_id,
+            device.product_id,
+            device.product,
+            device.is_vial,
+            device.serial,
+            device.path
+        );
     }
+    Ok(())
 }
 
 fn real(args: &[String]) -> Result<(), String> {
     if args.iter().any(|arg| arg == "--list") {
         return list();
     }
-    #[cfg(feature = "vial-hid")]
-    {
-        let transport =
-            zmk_tui::vial::transport::VialHid::open_first().map_err(|error| error.to_string())?;
-        println!("Opened {}", transport.descriptor().path);
-        let mut keyboard = VialKeyboard::open(transport).map_err(|error| error.to_string())?;
-        describe(&keyboard);
-        print_layer(&keyboard, 0, 12);
+    let transport =
+        zmk_tui::vial::transport::VialHid::open_first().map_err(|error| error.to_string())?;
+    println!("Opened {}", transport.descriptor().path);
+    let mut keyboard = VialKeyboard::open(transport).map_err(|error| error.to_string())?;
+    describe(&keyboard);
+    print_layer(&keyboard, 0, 12);
 
-        let document = VilDocument::from_keyboard(&keyboard);
-        let json = document
-            .to_json_string()
+    let document = VilDocument::from_keyboard(&keyboard);
+    let json = document
+        .to_json_string()
+        .map_err(|error| error.to_string())?;
+    let path = std::env::temp_dir().join("zmk-tui-vial-backup.vil");
+    std::fs::write(&path, json).map_err(|error| format!("write {}: {error}", path.display()))?;
+    println!("\nRead-only backup written to {}", path.display());
+
+    if args.iter().any(|arg| arg == "--write-test") {
+        let current = keyboard
+            .keycode_at(0, 0)
+            .ok_or_else(|| "keyboard has no key at position 0".to_string())?;
+        keyboard
+            .stage_keycode(0, 0, current)
             .map_err(|error| error.to_string())?;
-        let path = std::env::temp_dir().join("zmk-tui-vial-backup.vil");
-        std::fs::write(&path, json)
-            .map_err(|error| format!("write {}: {error}", path.display()))?;
-        println!("\nRead-only backup written to {}", path.display());
-
-        if args.iter().any(|arg| arg == "--write-test") {
-            let current = keyboard
-                .keycode_at(0, 0)
-                .ok_or_else(|| "keyboard has no key at position 0".to_string())?;
-            keyboard
-                .stage_keycode(0, 0, current)
-                .map_err(|error| error.to_string())?;
-            keyboard.save().map_err(|error| error.to_string())?;
-            println!("Write path verified (wrote 0x{current:04X} back).");
-        }
-        if let Some(path) = flag_value(args, "--restore") {
-            let text =
-                std::fs::read_to_string(&path).map_err(|error| format!("read {path}: {error}"))?;
-            let value: serde_json::Value =
-                serde_json::from_str(&text).map_err(|error| format!("parse {path}: {error}"))?;
-            let document = VilDocument::from_json(&value, keyboard.matrix())
-                .map_err(|error| error.to_string())?;
-            document
-                .apply(&mut keyboard)
-                .map_err(|error| error.to_string())?;
-            keyboard.save().map_err(|error| error.to_string())?;
-            println!("Restored {path}.");
-        }
-        Ok(())
+        keyboard.save().map_err(|error| error.to_string())?;
+        println!("Write path verified (wrote 0x{current:04X} back).");
     }
-    #[cfg(not(feature = "vial-hid"))]
-    {
-        let _ = args;
-        Err("built without the `vial-hid` feature; rerun with --features vial-hid".into())
+    if let Some(path) = flag_value(args, "--restore") {
+        let text =
+            std::fs::read_to_string(&path).map_err(|error| format!("read {path}: {error}"))?;
+        let value: serde_json::Value =
+            serde_json::from_str(&text).map_err(|error| format!("parse {path}: {error}"))?;
+        let document =
+            VilDocument::from_json(&value, keyboard.matrix()).map_err(|error| error.to_string())?;
+        document
+            .apply(&mut keyboard)
+            .map_err(|error| error.to_string())?;
+        keyboard.save().map_err(|error| error.to_string())?;
+        println!("Restored {path}.");
     }
+    Ok(())
 }
 
 fn flag_value(args: &[String], flag: &str) -> Option<String> {

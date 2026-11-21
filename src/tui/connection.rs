@@ -12,6 +12,7 @@ use crate::tui::app::{Msg, VialStart};
 use crate::vial::RawHid;
 use crate::vial::client::VialClient;
 use crate::vial::simulate::SimulatedVial;
+use crate::vial::transport::{VialDeviceInfo, list_vial_devices};
 
 #[derive(Default)]
 pub struct Snapshot {
@@ -31,16 +32,76 @@ pub struct Connected {
     pub snapshot: Option<Snapshot>,
 }
 
+/// One row in the connect screen's USB/HID list. The transport is also the
+/// standard: a CDC-ACM serial port is a ZMK Studio candidate, a raw-HID
+/// interface with Vial's serial magic is a Vial keyboard.
+#[derive(Clone, Debug)]
+pub enum UsbEntry {
+    Studio(serial::UsbDevice),
+    Vial(VialDeviceInfo),
+}
+
+impl UsbEntry {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Studio(device) => format!("ZMK Studio · {}", device.label()),
+            Self::Vial(device) => device.label(),
+        }
+    }
+
+    pub fn standard(&self) -> &'static str {
+        match self {
+            Self::Studio(_) => "ZMK Studio",
+            Self::Vial(_) => "Vial",
+        }
+    }
+
+    /// The backend choice for this row. A keyboard that exposes both a Studio
+    /// CDC port and a Vial raw-HID interface appears as two rows; selecting
+    /// either switches to that standard without restarting.
+    pub fn choice(&self) -> DeviceChoice {
+        match self {
+            Self::Studio(device) => DeviceChoice::Usb {
+                path: device.path.clone(),
+                label: format!("ZMK Studio · {}", device.label()),
+            },
+            Self::Vial(device) => DeviceChoice::Vial {
+                path: device.path.clone(),
+                label: device.label(),
+            },
+        }
+    }
+}
+
+/// Every USB/HID keyboard visible right now, already classified by interface.
+pub fn list_usb_entries() -> Vec<UsbEntry> {
+    let mut entries: Vec<UsbEntry> = serial::list_usb_devices()
+        .into_iter()
+        .map(UsbEntry::Studio)
+        .collect();
+    entries.extend(list_vial_devices().into_iter().map(UsbEntry::Vial));
+    entries
+}
+
 pub enum DeviceChoice {
     Usb { path: String, label: String },
+    Vial { path: String, label: String },
     Bluetooth { device: ble::BleDevice },
 }
 
 impl DeviceChoice {
     pub fn label(&self) -> String {
         match self {
-            Self::Usb { label, .. } => label.clone(),
+            Self::Usb { label, .. } | Self::Vial { label, .. } => label.clone(),
             Self::Bluetooth { device } => device.name.clone(),
+        }
+    }
+
+    pub fn standard(&self) -> &'static str {
+        match self {
+            Self::Usb { .. } => "ZMK Studio",
+            Self::Vial { .. } => "Vial",
+            Self::Bluetooth { .. } => "ZMK Studio",
         }
     }
 }
@@ -66,6 +127,11 @@ pub async fn connect_choice(
         DeviceChoice::Bluetooth { device } => ble::connect(device)
             .await
             .map_err(|error| format!("{error:#}"))?,
+        DeviceChoice::Vial { path, .. } => {
+            let transport =
+                crate::vial::transport::open_path(&path).map_err(|error| error.to_string())?;
+            return finish_vial_connection(Box::new(transport), ConnectionKind::Vial).await;
+        }
     };
     finish_connection(connection, events).await
 }
@@ -156,26 +222,26 @@ pub async fn finish_connection(
 /// raw-HID interface. The handshake and keymap read happen before the UI
 /// switches to the editor, so protocol errors are shown on the connect screen.
 pub async fn connect_vial(start: VialStart) -> Result<Connected, String> {
-    let (transport, kind): (Box<dyn RawHid>, ConnectionKind) = match start {
-        VialStart::Simulate => (
-            Box::new(SimulatedVial::demo()),
-            ConnectionKind::VialSimulator,
-        ),
-        VialStart::Usb => {
-            #[cfg(feature = "vial-hid")]
-            {
-                let transport = crate::vial::transport::VialHid::open_first()
-                    .map_err(|error| error.to_string())?;
-                (Box::new(transport), ConnectionKind::Vial)
-            }
-            #[cfg(not(feature = "vial-hid"))]
-            {
-                return Err(
-                    "this build has no Vial USB transport; rebuild with --features vial-hid".into(),
-                );
-            }
+    match start {
+        VialStart::Simulate => {
+            finish_vial_connection(
+                Box::new(SimulatedVial::demo()),
+                ConnectionKind::VialSimulator,
+            )
+            .await
         }
-    };
+        VialStart::Usb => {
+            let transport =
+                crate::vial::transport::VialHid::open_first().map_err(|error| error.to_string())?;
+            finish_vial_connection(Box::new(transport), ConnectionKind::Vial).await
+        }
+    }
+}
+
+async fn finish_vial_connection(
+    transport: Box<dyn RawHid>,
+    kind: ConnectionKind,
+) -> Result<Connected, String> {
     let client = VialClient::open(transport)
         .await
         .map_err(|error| friendly(&error))?;

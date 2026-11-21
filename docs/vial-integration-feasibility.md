@@ -12,7 +12,7 @@
 | 能不能复用现在的 UI？ | **能，且已用模拟器验证。** 仍是同一个 `App`、同一套按键/弹窗/保存/丢弃/恢复流程；Vial 只是第二个设备后端。 |
 | 键位模型冲突大不大？ | **中等，但可控。** 用 14 个伪 behavior 把 QMK 16 位键码投影到现有 `Binding` 模型；无法结构化的键码一律保留原始值，读改写不会丢数据。 |
 | "Vial 不太稳定"是不是真的？ | **协议本身很稳；生态版本耦合才是风险。** Vial 固件和 GUI 对协议版本、QMK 键码编号有硬耦合；GUI 更新慢；只走 USB；宏/Tap Dance/Combos 等是另一套扩展。 |
-| 今天做到哪一步？ | 模拟器端到端可编辑、可保存、可丢弃、可恢复；94 个库测试 + 41 个 TUI 测试 + 13 个 Vial 集成测试通过。 |
+| 今天做到哪一步？ | 模拟器端到端可编辑、可保存、可丢弃、可恢复；连接页自动识别 Studio / Vial 并显示对应标准；94 个库测试 + 42 个 TUI 测试 + 13 个 Vial 集成测试通过。 |
 | 明天真机先做什么？ | 只读探测（版本/UID/矩阵/定义/层数）→ `.vil` 备份 → 改一个空闲键 → 读回校验 → 恢复。清单见 §9。 |
 
 **可行性评级：**
@@ -31,6 +31,8 @@
 - 参数选择复用同一个 `ParamKind`（`HidUsage` / `LayerId` / `Range`）；
 - `s` 保存、`d` 丢弃、`R` 恢复出厂、`q` 退出、未保存提示，全部走原逻辑；
 - 只有"层管理"和"物理布局切换"通过 capability 隐藏/禁用，因为 Vial 的层数是固件编译期固定的。
+
+连接页也不区分两套流程：USB 面板同时列出 `ZMK Studio · …`（CDC-ACM 串口）和 `Vial · …`（带 Vial serial magic 的 raw HID）两类候选，选中哪一行就用对应后端连接。若同一把键盘同时暴露两种接口，会出现两行，标准切换就是换一行选择，不需要改构建或换命令。
 
 设备差异被收口在 `DeviceClient` 一个接口后面：
 
@@ -73,14 +75,15 @@ ZMK Studio RPC          VialKeyboard（暂存、校验、能力）
 | 文件 | 改动 |
 | --- | --- |
 | `src/lib.rs` | `pub mod device; pub mod vial;` |
-| `src/tui/connection.rs` | `Connected.client` 类型改为 `DeviceClient`；新增 `connect_vial` |
-| `src/tui/app.rs` | `StartOptions.vial`；`EditorState.client/capabilities`；启动分支；`L` 层管理禁用提示；提示文案 |
-| `src/main.rs` | `--vial` / `--simulate-vial` |
+| `src/tui/connection.rs` | `Connected.client` 类型改为 `DeviceClient`；新增 `UsbEntry` 分类、`connect_vial`、按路径打开 Vial |
+| `src/tui/app.rs` | `StartOptions.vial/scan_vial`；`EditorState.client/capabilities`；启动分支；USB 候选分类；`L` 层管理禁用提示；提示文案 |
+| `src/main.rs` | `--vial` / `--simulate-vial`；`--list` 增加 Vial 设备 |
 | `src/transport/mod.rs` | `ConnectionKind::{Vial, VialSimulator}` |
-| `Cargo.toml` / `Cargo.lock` | `lzma-rs`、`serde_json`；可选 `hidapi`（`vial-hid` feature） |
-| `tests/tui.rs` | 3 个 Vial TUI 流程测试 |
+| `src/tui/render.rs` | USB 面板标题改为 `USB / HID`，空状态提示两种标准 |
+| `Cargo.toml` / `Cargo.lock` | `lzma-rs`、`serde_json`、`hidapi` |
+| `tests/tui.rs` | 3 个 Vial TUI 流程测试 + 1 个 Studio/Vial 候选分类测试 |
 
-没有改：`client.rs`、`protocol/frame.rs`、`transport/serial.rs`、`transport/ble.rs`、`simulator.rs`、`tui/modals.rs`、`tui/render.rs`、`tui/keyboard.rs`、`keycodes/`。
+没有改：`client.rs`、`protocol/frame.rs`、`transport/serial.rs`、`transport/ble.rs`、`simulator.rs`、`tui/modals.rs`、`tui/keyboard.rs`、`keycodes/`；`tui/render.rs` 只动了连接页标题和空状态。
 
 ## 4. Vial 协议要点（已对源码核对）
 
@@ -137,13 +140,13 @@ QMK 一个格子是一个 16 位键码；现有模型是 `{behavior_id, param1, 
 
 ### 6.1 与上游/未来 Studio 改动的合并冲突
 
-冲突面被压到 8 个既有文件、约 330 行（其中一半是测试）。协议、传输、渲染、弹窗没动。即便如此，`app.rs`/`connection.rs` 仍是上游活跃区，未来 rebase 可能冲突。规避策略：
+冲突面被压到 10 个既有文件、约 380 行（其中一半是测试）。协议、串口/BLE 传输、弹窗没动；渲染只改了连接页文案。即便如此，`app.rs`/`connection.rs` 仍是上游活跃区，未来 rebase 可能冲突。规避策略：
 
 1. **不复制 Studio 逻辑**：不新建第二套 App/弹窗/保存状态机；
 2. **错误类型不扩散**：`VialError` 在 `VialClient` 边界映射成现有 `StudioError`，`Msg` 一个都没加；
 3. **能力而不是分支**：UI 只问 `capabilities()`，不写 `if is_vial` 散落各处；
 4. **新代码在新文件**：`src/vial/**`、`src/device.rs` 可整体摘除；
-5. **USB 依赖可选**：`hidapi` 只在 `--features vial-hid` 时编译，默认构建不受影响；
+5. **USB HID 依赖常驻**：自动识别需要 `hidapi` 才能枚举 raw HID；它只在连接页扫描时使用，不影响 Studio 路径；
 6. 若上游大改 `client.rs`，只需改 `DeviceClient::Studio` 的转发，不动 Vial 模块。
 
 ### 6.2 与现有 Studio 行为的语义冲突
@@ -160,14 +163,14 @@ QMK 一个格子是一个 16 位键码；现有模型是 `{behavior_id, param1, 
 ### 6.3 运行时冲突
 
 - **HID 独占**：同一时刻只能有一个进程打开 raw HID；Vial GUI/浏览器 WebHID/我们的 TUI 会互相抢。真机测试前先退出 Vial GUI。
-- **多键盘/多接口**：`--vial` 目前取"第一个 serial 含 `vial:` 的接口，否则第一个 0xFF60/0x61 接口"。多把 Vial 键盘同时插入时可能选错；先用 `--list` 确认路径/序列号。
+- **多键盘/多接口**：连接页会列出所有候选；但 `--vial` 快捷方式仍取"第一个 serial 含 `vial:` 的接口，否则第一个 0xFF60/0x61 接口"。多把 Vial 键盘同时插入时用连接页选择，或先用 `--list` 确认。
 - **平台权限**：macOS 可能要求终端有输入监控/蓝牙权限；Linux 需要 udev 规则（Vial 文档有）；Windows 未验证。
 - **BLE 不可能**：Vial 的编辑通道是 USB raw HID；本实现也只做了 USB。不要把"无线 Vial"写进预期。
 
 ### 6.4 测试/质量门冲突
 
 - 现有门禁要求 CRAP、覆盖率、变异测试、Kani。新增约 3.3k 行会拉低覆盖率、改变 CRAP 报告；`tools/quality-gate.sh` 本次**没有完整跑**（依赖 `cargo-llvm-cov`/`cargo-mutants`/Kani/lizard，且沙箱下 cargo 缓存需本地化）。
-- 已跑：`cargo test --all-targets`、`cargo clippy --all-targets -- -D warnings`、`cargo fmt`、`cargo check --features vial-hid`。
+- 已跑：`cargo test --all-targets`、`cargo clippy --all-targets -- -D warnings`、`cargo fmt`、`cargo check --all-targets`。
 - 合并前需要：把 Vial 模块纳入覆盖率统计，或按 `src/transport/**` 先例对 `src/vial/transport.rs` 做排除；给 `keycode.rs`/`protocol.rs` 补变异测试目标；确认 CRAP >30 为 0。
 
 ## 7. "Vial 不稳定"到底指什么
@@ -219,7 +222,7 @@ TUI 模拟器路径（`--simulate-vial`）由 `tests/tui.rs` 覆盖：
 - 未保存时 `d` 丢弃，键位回到 `A`；
 - `L` 不打开层管理，提示 "fixed layer count"。
 
-当前测试统计：库 94、client 3、TUI 41、Vial 13、cucumber 4；`clippy -D warnings` 与 `fmt` 通过；`--features vial-hid` 可编译。
+当前测试统计：库 94、client 3、TUI 42、Vial 13、cucumber 4；`clippy -D warnings` 与 `fmt` 通过；默认构建即包含真实 Vial USB 传输。
 
 ## 9. 明日真机验证清单
 
@@ -229,8 +232,8 @@ TUI 模拟器路径（`--simulate-vial`）由 `tests/tui.rs` 覆盖：
 
 ```bash
 cd /Users/zhouye/projects/zmk/.worktrees/vial-spike
-cargo build --release --features vial-hid
-cargo run --features vial-hid --example vial_probe -- --list
+cargo build --release
+cargo run --example vial_probe -- --list
 ```
 
 期望：出现 usage page `0xFF60`/usage `0x61` 的接口；serial 含 `vial:f64c2b3c`（`is_vial=true`）。
@@ -239,7 +242,7 @@ cargo run --features vial-hid --example vial_probe -- --list
 ### 9.2 只读探测
 
 ```bash
-cargo run --features vial-hid --example vial_probe -- --real
+cargo run --example vial_probe -- --real
 ```
 
 记录并核对：
@@ -257,7 +260,7 @@ cargo run --features vial-hid --example vial_probe -- --real
 先退出 Vial GUI（raw HID 独占），然后：
 
 ```bash
-cargo run --features vial-hid -- --vial
+cargo run -- --vial
 ```
 
 - [ ] 选一个**空闲/可恢复**的键，改成明显不同的键码（例如 `A` → `B`）
@@ -276,7 +279,7 @@ cargo run --features vial-hid -- --vial
 
 ```bash
 # 恢复（probe 会暂存、保存并读回校验）
-cargo run --features vial-hid --example vial_probe -- --real --restore /path/to/backup.vil
+cargo run --example vial_probe -- --real --restore /path/to/backup.vil
 ```
 
 - [ ] 用本工具导出的 `.vil` 能被 Vial GUI 打开/恢复（我们写的是 `0xNNNN` 十六进制键码，Vial 的 AnyKeycode 接受）
@@ -310,11 +313,12 @@ Raw 键码数量/样例：
 2. **编码器**：只统计，不显示/不编辑。
 3. **物理布局切换 / layout options**：只显示定义里的第一套；重复矩阵格去重。
 4. **无线**：Vial 走 USB raw HID；BLE 无解。
-5. **连接界面**：`--vial` 直接打开第一个候选，尚未在连接页列出 Vial 设备/热插拔。
+5. **连接界面**：Vial 已并入 USB 候选列表，但还没有热插拔监听；设备插拔后按 `r` 重新扫描。`--vial` 快捷方式只打开第一个候选。
 6. **保存原子性**：逐键写 + 读回校验；断线可能部分写入。
 7. **`.vil`**：只覆盖键位，不含宏/动态条目；只接受数字键码（本工具导出的格式）。
 8. **平台**：macOS 已编译验证；Linux/Windows 仅理论上 hidapi 可用，未测试。
 9. **质量门**：未跑完整 `tools/quality-gate.sh`；合并前需补覆盖率/CRAP/变异基线。
+10. **跨标准热切换**：连接后要换标准需要退出编辑器、重新选择另一行；没有在编辑器内原地切换后端的快捷键。
 
 ## 11. 代码地图与回滚
 

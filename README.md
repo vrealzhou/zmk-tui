@@ -44,11 +44,15 @@ keyboards over USB raw HID. Start the in-process demo without hardware:
 cargo run -- --simulate-vial
 ```
 
-For a real keyboard, build with the optional HID transport and connect to the
-first Vial raw-HID interface:
+Real keyboards are detected automatically on the connect screen: ZMK Studio
+keyboards appear as `ZMK Studio · …` serial ports and Vial keyboards as
+`Vial · …` raw-HID interfaces. Select either row and press Enter; a keyboard
+that exposes both interfaces appears twice, so both standards are available
+from the same connect screen. `--vial` remains available as a shortcut that
+opens the first Vial interface directly.
 
 ```bash
-cargo run --features vial-hid -- --vial
+cargo run -- --vial
 ```
 
 Vial support is intentionally keycode-only: bindings, layers (fixed count) and
@@ -62,8 +66,8 @@ for protocol details, limitations and the hardware test checklist.
 `--list` for Vial devices (read-only) is available through the probe:
 
 ```bash
-cargo run --features vial-hid --example vial_probe -- --list
-cargo run --features vial-hid --example vial_probe -- --real
+cargo run --example vial_probe -- --list
+cargo run --example vial_probe -- --real
 ```
 
 ## Supported keyboards

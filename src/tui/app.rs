@@ -17,8 +17,8 @@ use crate::model::{
 use crate::simulator::{SimulatedBoard, Simulator};
 use crate::transport::{ConnectionKind, ble, serial};
 use crate::tui::connection::{
-    Connected, DeviceChoice, Snapshot, connect_by_bluetooth_name, connect_choice,
-    finish_connection, load_snapshot, scan_bluetooth,
+    Connected, DeviceChoice, Snapshot, UsbEntry, connect_by_bluetooth_name, connect_choice,
+    finish_connection, list_usb_entries, load_snapshot, scan_bluetooth,
 };
 use crate::tui::modals::{
     BindingWizard, ConfirmModal, LayerModal, LayoutModal, Modal, UiAction, UnlockModal,
@@ -44,6 +44,10 @@ pub struct StartOptions {
     pub ble: Option<String>,
     pub simulate: Option<SimulatedBoard>,
     pub vial: Option<VialStart>,
+    /// Whether the connect screen also enumerates Vial raw-HID interfaces.
+    /// The binary enables this; library tests keep it off so they never probe
+    /// host hardware.
+    pub scan_vial: bool,
 }
 
 pub enum Msg {
@@ -52,7 +56,7 @@ pub enum Msg {
     Tick,
     /// The terminal input thread stopped (stdin closed or a read error).
     InputClosed,
-    UsbDevices(Vec<serial::UsbDevice>),
+    UsbDevices(Vec<UsbEntry>),
     BluetoothDevices(Result<Vec<ble::BleDevice>, String>),
     ConnectResult(Result<Connected, String>),
     DeviceEvent(StudioEvent),
@@ -104,7 +108,7 @@ pub enum Panel {
 }
 
 pub struct ConnectState {
-    pub usb: Vec<serial::UsbDevice>,
+    pub usb: Vec<UsbEntry>,
     pub bluetooth: Vec<ble::BleDevice>,
     pub focus: Panel,
     pub usb_state: ListState,
@@ -1279,7 +1283,14 @@ impl App {
     // ------------------------------------------------------------------
 
     fn refresh_usb(&mut self) {
-        self.connect.usb = serial::list_usb_devices();
+        self.connect.usb = if self.start.scan_vial {
+            list_usb_entries()
+        } else {
+            serial::list_usb_devices()
+                .into_iter()
+                .map(UsbEntry::Studio)
+                .collect()
+        };
         self.clamp_connect_selection();
     }
 
@@ -1299,10 +1310,7 @@ impl App {
             Panel::Usb => {
                 let index = self.connect.usb_state.selected().unwrap_or(0);
                 match self.connect.usb.get(index) {
-                    Some(device) => Some(DeviceChoice::Usb {
-                        path: device.path.clone(),
-                        label: device.label(),
-                    }),
+                    Some(entry) => Some(entry.choice()),
                     None => {
                         self.toast("Select a USB keyboard first", StatusKind::Warning);
                         None
@@ -1332,7 +1340,11 @@ impl App {
             return;
         }
         self.connect_inflight = true;
-        self.busy = Some(format!("Connecting to {}…", choice.label()));
+        self.busy = Some(format!(
+            "Connecting to {} · {}…",
+            choice.label(),
+            choice.standard()
+        ));
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let result = connect_choice(choice, tx.clone()).await;

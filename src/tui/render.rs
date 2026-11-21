@@ -531,7 +531,7 @@ fn render_usb_panel(
     let count = connect.usb.len();
     let title = Line::from(vec![
         Span::styled(
-            " USB ",
+            " USB / HID ",
             Style::default()
                 .fg(theme::ACCENT)
                 .add_modifier(Modifier::BOLD),
@@ -550,11 +550,11 @@ fn render_usb_panel(
         frame.render_widget(
             Paragraph::new(vec![
                 Line::from(Span::styled(
-                    "No USB serial devices",
+                    "No USB keyboards found",
                     Style::default().fg(theme::TEXT),
                 )),
                 Line::from(Span::styled(
-                    "Connect the keyboard with a data cable.",
+                    "Studio uses a serial port; Vial uses raw HID.",
                     theme::dim(),
                 )),
             ])

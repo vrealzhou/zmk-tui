@@ -5,10 +5,9 @@
 //! report. `hidapi` writes the report-ID-0 prefix itself only if it is part of
 //! the buffer, so the buffer passed to `write` is `[0, ..32 bytes]`.
 //!
-//! This module is behind the `vial-hid` feature so the default ZMK Studio
-//! build does not link a USB HID stack.
-
-#![cfg(feature = "vial-hid")]
+//! The interface and serial string are descriptors only: enumeration never
+//! opens the device, so scanning cannot disturb a keyboard that another
+//! program (Vial GUI, a browser using WebHID) currently owns.
 
 use hidapi::{HidApi, HidDevice};
 
@@ -25,6 +24,28 @@ pub struct HidDescriptor {
     pub product: String,
     pub path: String,
     pub is_vial: bool,
+}
+
+/// A Vial keyboard discovered on the raw-HID interface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VialDeviceInfo {
+    pub name: String,
+    pub path: String,
+    pub vendor_id: u16,
+    pub product_id: u16,
+    pub serial: String,
+}
+
+impl VialDeviceInfo {
+    /// Label shown in the connect list.
+    pub fn label(&self) -> String {
+        let name = if self.name.trim().is_empty() {
+            "Vial keyboard"
+        } else {
+            self.name.trim()
+        };
+        format!("Vial · {name}")
+    }
 }
 
 /// Enumerate the raw-HID interfaces that look like Vial or VIA keyboards.
@@ -47,6 +68,40 @@ pub fn list() -> Result<Vec<HidDescriptor>> {
         .collect())
 }
 
+/// Enumerate only interfaces whose serial number carries Vial's build-time
+/// magic (`build_vial.mk` defines `SERIAL_NUMBER="vial:f64c2b3c"`). This is a
+/// descriptor-only scan: no HID device is opened.
+pub fn list_vial_devices() -> Vec<VialDeviceInfo> {
+    let Ok(descriptors) = list() else {
+        return Vec::new();
+    };
+    descriptors
+        .into_iter()
+        .filter(|descriptor| descriptor.is_vial)
+        .map(|descriptor| VialDeviceInfo {
+            name: if descriptor.product.is_empty() {
+                "Vial keyboard".into()
+            } else {
+                descriptor.product
+            },
+            path: descriptor.path,
+            vendor_id: descriptor.vendor_id,
+            product_id: descriptor.product_id,
+            serial: descriptor.serial,
+        })
+        .collect()
+}
+
+/// Open one specific raw-HID interface by its platform path.
+pub fn open_path(path: &str) -> Result<VialHid> {
+    let api = HidApi::new().map_err(|error| VialError::Transport(error.to_string()))?;
+    let descriptor = list()?
+        .into_iter()
+        .find(|descriptor| descriptor.path == path)
+        .ok_or_else(|| VialError::Transport(format!("no raw-HID interface at path {path}")))?;
+    VialHid::open_descriptor(&api, descriptor)
+}
+
 pub struct VialHid {
     device: HidDevice,
     descriptor: HidDescriptor,
@@ -56,33 +111,22 @@ impl VialHid {
     /// Open the first interface whose serial number carries Vial's magic, or
     /// failing that, the first raw-HID candidate.
     pub fn open_first() -> Result<Self> {
+        let descriptors = list()?;
+        let descriptor = descriptors
+            .iter()
+            .find(|descriptor| descriptor.is_vial)
+            .or_else(|| descriptors.first())
+            .cloned()
+            .ok_or_else(|| {
+                VialError::Transport(
+                    "no Vial/VIA raw-HID interface found (usage page 0xFF60, usage 0x61)".into(),
+                )
+            })?;
         let api = HidApi::new().map_err(|error| VialError::Transport(error.to_string()))?;
-        let mut vial = None;
-        let mut fallback = None;
-        for device in api.device_list() {
-            if device.usage_page() != HID_USAGE_PAGE || device.usage() != HID_USAGE {
-                continue;
-            }
-            let serial = device.serial_number().unwrap_or_default().to_string();
-            let descriptor = HidDescriptor {
-                vendor_id: device.vendor_id(),
-                product_id: device.product_id(),
-                is_vial: serial.contains(SERIAL_MAGIC),
-                serial,
-                product: device.product_string().unwrap_or_default().to_string(),
-                path: device.path().to_string_lossy().into_owned(),
-            };
-            if descriptor.is_vial {
-                vial = Some(descriptor);
-                break;
-            }
-            fallback.get_or_insert(descriptor);
-        }
-        let descriptor = vial.or(fallback).ok_or_else(|| {
-            VialError::Transport(
-                "no Vial/VIA raw-HID interface found (usage page 0xFF60, usage 0x61)".into(),
-            )
-        })?;
+        Self::open_descriptor(&api, descriptor)
+    }
+
+    fn open_descriptor(api: &HidApi, descriptor: HidDescriptor) -> Result<Self> {
         let path = std::ffi::CString::new(descriptor.path.as_bytes())
             .map_err(|error| VialError::Transport(format!("invalid HID path: {error}")))?;
         let device = api

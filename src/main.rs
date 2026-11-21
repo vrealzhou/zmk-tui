@@ -41,7 +41,7 @@ struct Cli {
     #[arg(long, conflicts_with_all = ["port", "ble", "simulate", "vial"])]
     simulate_vial: bool,
 
-    /// Edit the first Vial keyboard over USB raw HID (needs --features vial-hid)
+    /// Edit the first Vial keyboard over USB raw HID
     #[arg(long, conflicts_with_all = ["port", "ble", "simulate", "simulate_vial"])]
     vial: bool,
 }
@@ -53,12 +53,6 @@ async fn main() -> anyhow::Result<()> {
     if cli.list {
         list_devices().await?;
         return Ok(());
-    }
-
-    if cli.vial && !cfg!(feature = "vial-hid") {
-        anyhow::bail!(
-            "this build has no Vial USB transport; rebuild with `cargo build --features vial-hid`"
-        );
     }
 
     let vial = if cli.simulate_vial {
@@ -74,6 +68,7 @@ async fn main() -> anyhow::Result<()> {
         ble: cli.ble,
         simulate: cli.simulate,
         vial,
+        scan_vial: true,
     })
     .await
 }
@@ -92,6 +87,19 @@ async fn list_devices() -> anyhow::Result<()> {
         if let Some(serial) = &device.serial_number {
             println!("      serial: {serial}");
         }
+    }
+
+    println!();
+    println!("Vial raw-HID keyboards:");
+    let vial = zmk_tui::vial::transport::list_vial_devices();
+    if vial.is_empty() {
+        println!("  (none)");
+    }
+    for device in vial {
+        println!(
+            "  {:04X}:{:04X} {}  serial={:?} path={}",
+            device.vendor_id, device.product_id, device.name, device.serial, device.path
+        );
     }
 
     println!();

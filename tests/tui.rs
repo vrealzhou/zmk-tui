@@ -18,10 +18,11 @@ use zmk_tui::simulator::SimulatedBoard;
 use zmk_tui::transport::serial::UsbDevice;
 use zmk_tui::tui::StartOptions;
 use zmk_tui::tui::app::{App, Msg, Panel, StatusKind, VialStart};
-use zmk_tui::tui::connection::Snapshot;
+use zmk_tui::tui::connection::{DeviceChoice, Snapshot, UsbEntry};
 use zmk_tui::tui::modals::{Modal, Stage, UnlockModal, behavior_items};
 use zmk_tui::tui::mouse::{ListKind, MouseTarget};
 use zmk_tui::tui::render;
+use zmk_tui::vial::transport::VialDeviceInfo;
 
 fn screen_text(app: &mut App) -> String {
     screen_text_sized(app, 120, 35)
@@ -777,18 +778,18 @@ async fn lock_poll_results_clear_or_set_lock_state() {
 fn mouse_scroll_moves_connect_and_editor_selection() {
     let mut app = disconnected_app();
     app.connect.usb = vec![
-        UsbDevice {
+        UsbEntry::Studio(UsbDevice {
             path: "/dev/test0".into(),
             product: Some("Test Keyboard".into()),
             manufacturer: None,
             serial_number: None,
-        },
-        UsbDevice {
+        }),
+        UsbEntry::Studio(UsbDevice {
             path: "/dev/test1".into(),
             product: Some("Test Keyboard".into()),
             manufacturer: None,
             serial_number: None,
-        },
+        }),
     ];
     app.connect.usb_state.select(Some(0));
     let _ = screen_text(&mut app);
@@ -892,12 +893,12 @@ async fn unlock_modal_enter_starts_a_lock_poll() {
 fn usb_device_messages_clamp_connect_selection() {
     let mut app = disconnected_app();
     app.connect.usb_state.select(Some(9));
-    app.handle(Msg::UsbDevices(vec![UsbDevice {
+    app.handle(Msg::UsbDevices(vec![UsbEntry::Studio(UsbDevice {
         path: "/dev/test0".into(),
         product: Some("Test Keyboard".into()),
         manufacturer: None,
         serial_number: None,
-    }]));
+    })]));
     assert_eq!(app.connect.usb_state.selected(), Some(0));
 
     app.handle(Msg::UsbDevices(Vec::new()));
@@ -1307,4 +1308,40 @@ async fn vial_staged_edits_can_be_discarded() {
                 .unwrap_or(false)
     })
     .await;
+}
+
+#[test]
+fn connect_screen_labels_studio_and_vial_rows() {
+    let mut app = disconnected_app();
+    app.connect.usb = vec![
+        UsbEntry::Studio(UsbDevice {
+            path: "/dev/cu.studio".into(),
+            product: Some("Sofle".into()),
+            manufacturer: None,
+            serial_number: None,
+        }),
+        UsbEntry::Vial(VialDeviceInfo {
+            name: "Sofle Vial".into(),
+            path: "hid-path".into(),
+            vendor_id: 0x1234,
+            product_id: 0x5678,
+            serial: "vial:f64c2b3c".into(),
+        }),
+    ];
+    app.connect.usb_state.select(Some(0));
+    let screen = screen_text(&mut app);
+    assert!(screen.contains("USB / HID"), "{screen}");
+    assert!(screen.contains("ZMK Studio · Sofle"), "{screen}");
+    assert!(screen.contains("Vial · Sofle Vial"), "{screen}");
+
+    assert_eq!(app.connect.usb[0].standard(), "ZMK Studio");
+    assert_eq!(app.connect.usb[1].standard(), "Vial");
+    assert!(matches!(
+        app.connect.usb[0].choice(),
+        DeviceChoice::Usb { .. }
+    ));
+    assert!(matches!(
+        app.connect.usb[1].choice(),
+        DeviceChoice::Vial { .. }
+    ));
 }
