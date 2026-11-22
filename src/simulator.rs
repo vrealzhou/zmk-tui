@@ -22,6 +22,14 @@ pub enum SimulatedBoard {
     Corne,
     /// A Sofle with 6 columns per half and five thumb keys, 60 key positions.
     Sofle,
+    /// A 58 key split board: 4x6 per half plus five thumb keys per half, with
+    /// the wide centre gap used by trackball modules.
+    #[value(alias = "58")]
+    Lily58,
+    /// A 46 key split board: 3x6 per half plus five thumb keys per half, with
+    /// a trackball cut-out in the centre gap.
+    #[value(alias = "46")]
+    Split46,
 }
 
 impl SimulatedBoard {
@@ -29,6 +37,8 @@ impl SimulatedBoard {
         match self {
             Self::Corne => "Corne",
             Self::Sofle => "Sofle",
+            Self::Lily58 => "Lily58 + trackball",
+            Self::Split46 => "Split 46 + trackball",
         }
     }
 
@@ -36,6 +46,8 @@ impl SimulatedBoard {
         match self {
             Self::Corne => "Corne (simulator)",
             Self::Sofle => "Sofle (simulator)",
+            Self::Lily58 => "Lily58 + trackball (simulator)",
+            Self::Split46 => "Split 46 + trackball (simulator)",
         }
     }
 
@@ -43,6 +55,8 @@ impl SimulatedBoard {
         match self {
             Self::Corne => 42,
             Self::Sofle => 60,
+            Self::Lily58 => 58,
+            Self::Split46 => 46,
         }
     }
 }
@@ -248,6 +262,132 @@ pub fn sofle_geometry() -> PhysicalLayout {
 
     PhysicalLayout {
         name: "Sofle".into(),
+        keys,
+    }
+}
+
+/// A 58 key Lily58 layout: four rows of six keys per half plus five thumb keys
+/// per half. Coordinates follow ZMK's in-tree `kata0510/lily58` layout. The
+/// wide centre gap between the halves is where trackball modules are mounted;
+/// ZMK Studio only reports key positions, so the trackball itself is not part
+/// of the layout and renders as empty space.
+pub fn lily58_geometry() -> PhysicalLayout {
+    let left_x = [0.0_f32, 1.0, 2.0, 3.0, 4.0, 5.0];
+    let right_x = [10.5_f32, 11.5, 12.5, 13.5, 14.5, 15.5];
+    let left_stagger = [0.50_f32, 0.37, 0.12, 0.0, 0.12, 0.25];
+    let right_stagger = [0.25_f32, 0.12, 0.0, 0.12, 0.37, 0.50];
+    let mut keys = Vec::with_capacity(58);
+
+    for row in 0..4 {
+        for (column, x) in left_x.into_iter().enumerate() {
+            keys.push(KeyGeometry {
+                x,
+                y: row as f32 + left_stagger[column],
+                width: 1.0,
+                height: 1.0,
+                ..Default::default()
+            });
+        }
+        for (column, x) in right_x.into_iter().enumerate() {
+            keys.push(KeyGeometry {
+                x,
+                y: row as f32 + right_stagger[column],
+                width: 1.0,
+                height: 1.0,
+                ..Default::default()
+            });
+        }
+    }
+
+    // Five thumbs per side, ordered left to right (left half, then right half)
+    // to match the binding order used by `lily58_layers`.
+    for (x, y, width, height, rotation, rx, ry) in [
+        (
+            2.50_f32, 4.12_f32, 1.0_f32, 1.0_f32, 0.0_f32, 0.0_f32, 0.0_f32,
+        ),
+        (3.50, 4.15, 1.0, 1.0, 0.0, 0.0, 0.0),
+        (4.50, 4.25, 1.0, 1.0, 0.0, 0.0, 0.0),
+        (5.75, 4.00, 1.0, 1.5, 30.0, 6.25, 4.75),
+        (6.00, 2.75, 1.0, 1.0, 0.0, 0.0, 0.0),
+        (9.50, 2.75, 1.0, 1.0, 0.0, 0.0, 0.0),
+        (9.75, 4.00, 1.0, 1.5, -30.0, 10.25, 4.75),
+        (11.00, 4.25, 1.0, 1.0, 0.0, 0.0, 0.0),
+        (12.00, 4.15, 1.0, 1.0, 0.0, 0.0, 0.0),
+        (13.00, 4.15, 1.0, 1.0, 0.0, 0.0, 0.0),
+    ] {
+        keys.push(KeyGeometry {
+            x,
+            y,
+            width,
+            height,
+            rotation,
+            rotation_x: rx,
+            rotation_y: ry,
+        });
+    }
+
+    PhysicalLayout {
+        name: "Lily58".into(),
+        keys,
+    }
+}
+
+/// A 46 key split layout: three rows of six keys per half plus five thumb keys
+/// per half. The centre gap leaves room for a trackball module (not part of the
+/// Studio layout data).
+pub fn split46_geometry() -> PhysicalLayout {
+    let left_x = [0.0_f32, 1.0, 2.0, 3.0, 4.0, 5.0];
+    let right_x = [9.0_f32, 10.0, 11.0, 12.0, 13.0, 14.0];
+    let left_stagger = [0.37_f32, 0.37, 0.12, 0.0, 0.12, 0.24];
+    let right_stagger = [0.24_f32, 0.12, 0.0, 0.12, 0.37, 0.37];
+    let mut keys = Vec::with_capacity(46);
+
+    for row in 0..3 {
+        for (column, x) in left_x.into_iter().enumerate() {
+            keys.push(KeyGeometry {
+                x,
+                y: row as f32 + left_stagger[column],
+                width: 1.0,
+                height: 1.0,
+                ..Default::default()
+            });
+        }
+        for (column, x) in right_x.into_iter().enumerate() {
+            keys.push(KeyGeometry {
+                x,
+                y: row as f32 + right_stagger[column],
+                width: 1.0,
+                height: 1.0,
+                ..Default::default()
+            });
+        }
+    }
+
+    for (x, y, rotation, rx, ry) in [
+        (1.75_f32, 3.37_f32, 0.0_f32, 0.0_f32, 0.0_f32),
+        (2.75, 3.12, 0.0, 0.0, 0.0),
+        (3.75, 3.12, 0.0, 0.0, 0.0),
+        (4.90, 3.12, 12.0, 4.90, 3.12),
+        (6.00, 2.83, 24.0, 6.00, 3.33),
+        (8.00, 2.83, -24.0, 9.00, 3.33),
+        (9.10, 3.12, -12.0, 10.10, 3.12),
+        (10.25, 3.12, 0.0, 0.0, 0.0),
+        (11.25, 3.12, 0.0, 0.0, 0.0),
+        (12.25, 3.37, 0.0, 0.0, 0.0),
+    ] {
+        keys.push(KeyGeometry {
+            x,
+            y,
+            width: 1.0,
+            height: 1.0,
+            rotation,
+            rotation_x: rx,
+            rotation_y: ry,
+        });
+    }
+
+    PhysicalLayout {
+        name: "Split 46".into(),
         keys,
     }
 }
@@ -710,19 +850,234 @@ fn sofle_layers() -> Vec<SimLayer> {
     vec![base, lower, raise, adjust, media]
 }
 
+/// Build a list of `&kp` bindings from ZMK keycode names.
+fn bindings(names: &[&str]) -> Vec<zmk::keymap::BehaviorBinding> {
+    names.iter().map(|name| kp(name)).collect()
+}
+
+/// Symbol/numbers layer used by the trackball simulators.
+fn symbol_keys() -> Vec<zmk::keymap::BehaviorBinding> {
+    bindings(&[
+        "GRAVE",
+        "NUMBER_1",
+        "NUMBER_2",
+        "NUMBER_3",
+        "NUMBER_4",
+        "NUMBER_5",
+        "NUMBER_6",
+        "NUMBER_7",
+        "NUMBER_8",
+        "NUMBER_9",
+        "NUMBER_0",
+        "MINUS",
+        "EQUAL",
+        "LEFT_BRACKET",
+        "RIGHT_BRACKET",
+        "BACKSLASH",
+        "SEMICOLON",
+        "SINGLE_QUOTE",
+        "COMMA",
+        "DOT",
+        "SLASH",
+    ])
+}
+
+/// Function keys plus navigation keys used by the trackball simulators.
+fn navigation_keys() -> Vec<zmk::keymap::BehaviorBinding> {
+    let mut keys = bindings(&[
+        "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
+    ]);
+    keys.extend(bindings(&[
+        "INSERT",
+        "HOME",
+        "PAGE_UP",
+        "DELETE",
+        "END",
+        "PAGE_DOWN",
+        "LEFT_ARROW",
+        "DOWN_ARROW",
+        "UP_ARROW",
+        "RIGHT_ARROW",
+    ]));
+    keys
+}
+
+/// Five layers (Base, Lower, Raise, Adjust, Media) around a given base layer.
+/// The last two thumb positions switch to Adjust and Media, mirroring the other
+/// simulators.
+fn trackball_layers(base: Vec<zmk::keymap::BehaviorBinding>, key_count: usize) -> Vec<SimLayer> {
+    debug_assert_eq!(base.len(), key_count);
+    let mut raise = pad(navigation_keys(), key_count);
+    if key_count >= 2 {
+        raise[key_count - 2] = mo(3);
+        raise[key_count - 1] = mo(4);
+    }
+    vec![
+        SimLayer {
+            id: 0,
+            name: "Base".into(),
+            bindings: base,
+        },
+        SimLayer {
+            id: 1,
+            name: "Lower".into(),
+            bindings: pad(symbol_keys(), key_count),
+        },
+        SimLayer {
+            id: 2,
+            name: "Raise".into(),
+            bindings: raise,
+        },
+        SimLayer {
+            id: 3,
+            name: "Adjust".into(),
+            bindings: pad(f_keys(), key_count),
+        },
+        SimLayer {
+            id: 4,
+            name: "Media".into(),
+            bindings: pad(media_keys(), key_count),
+        },
+    ]
+}
+
+/// 58 key Lily58 keymap. The trackball's buttons are ordinary key positions in
+/// the matrix, so they are edited like any other binding in ZMK Studio.
+fn lily58_layers() -> Vec<SimLayer> {
+    let mut base = bindings(&[
+        "GRAVE",
+        "NUMBER_1",
+        "NUMBER_2",
+        "NUMBER_3",
+        "NUMBER_4",
+        "NUMBER_5",
+        "NUMBER_6",
+        "NUMBER_7",
+        "NUMBER_8",
+        "NUMBER_9",
+        "NUMBER_0",
+        "MINUS",
+        "TAB",
+        "Q",
+        "W",
+        "E",
+        "R",
+        "T",
+        "Y",
+        "U",
+        "I",
+        "O",
+        "P",
+        "BSPC",
+        "ESCAPE",
+        "A",
+        "S",
+        "D",
+        "F",
+        "G",
+        "H",
+        "J",
+        "K",
+        "L",
+        "SEMICOLON",
+        "SINGLE_QUOTE",
+        "LSHIFT",
+        "Z",
+        "X",
+        "C",
+        "V",
+        "B",
+        "N",
+        "M",
+        "COMMA",
+        "DOT",
+        "SLASH",
+        "RSHIFT",
+    ]);
+    base.extend([
+        kp("LCTRL"),
+        kp("LGUI"),
+        kp("LALT"),
+        mo(1),
+        kp("SPACE"),
+        mo(2),
+        kp("RALT"),
+        kp("RGUI"),
+        kp("RCTRL"),
+        kp("RETURN"),
+    ]);
+    trackball_layers(base, 58)
+}
+
+/// 46 key split keymap (three rows plus five thumbs per half).
+fn split46_layers() -> Vec<SimLayer> {
+    let mut base = bindings(&[
+        "GRAVE",
+        "NUMBER_1",
+        "NUMBER_2",
+        "NUMBER_3",
+        "NUMBER_4",
+        "NUMBER_5",
+        "NUMBER_6",
+        "NUMBER_7",
+        "NUMBER_8",
+        "NUMBER_9",
+        "NUMBER_0",
+        "MINUS",
+        "TAB",
+        "Q",
+        "W",
+        "E",
+        "R",
+        "T",
+        "Y",
+        "U",
+        "I",
+        "O",
+        "P",
+        "BSPC",
+        "LSHIFT",
+        "A",
+        "S",
+        "D",
+        "F",
+        "G",
+        "H",
+        "J",
+        "K",
+        "L",
+        "SEMICOLON",
+        "SINGLE_QUOTE",
+    ]);
+    base.extend([
+        kp("LCTRL"),
+        kp("LGUI"),
+        kp("LALT"),
+        mo(1),
+        kp("SPACE"),
+        mo(2),
+        kp("RALT"),
+        kp("RGUI"),
+        kp("RCTRL"),
+        kp("RETURN"),
+    ]);
+    trackball_layers(base, 46)
+}
+
 impl DeviceState {
     fn new(board: SimulatedBoard, locked: bool) -> Self {
-        let layers = match board {
-            SimulatedBoard::Corne => corne_layers(),
-            SimulatedBoard::Sofle => sofle_layers(),
-        };
-        let layouts = match board {
-            SimulatedBoard::Corne => vec![corne_geometry(), {
-                let mut wide = corne_wide_geometry();
-                wide.name = "Corne wide".into();
-                wide
-            }],
-            SimulatedBoard::Sofle => vec![sofle_geometry()],
+        let (layers, layouts) = match board {
+            SimulatedBoard::Corne => (
+                corne_layers(),
+                vec![corne_geometry(), {
+                    let mut wide = corne_wide_geometry();
+                    wide.name = "Corne wide".into();
+                    wide
+                }],
+            ),
+            SimulatedBoard::Sofle => (sofle_layers(), vec![sofle_geometry()]),
+            SimulatedBoard::Lily58 => (lily58_layers(), vec![lily58_geometry()]),
+            SimulatedBoard::Split46 => (split46_layers(), vec![split46_geometry()]),
         };
         let key_count = layers
             .first()
@@ -1456,4 +1811,66 @@ fn keymap_response(
 /// Give the simulator's async tasks a chance to observe a command.
 pub async fn settle() {
     tokio::time::sleep(Duration::from_millis(10)).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL_BOARDS: [SimulatedBoard; 4] = [
+        SimulatedBoard::Corne,
+        SimulatedBoard::Sofle,
+        SimulatedBoard::Lily58,
+        SimulatedBoard::Split46,
+    ];
+
+    #[test]
+    fn every_board_reports_matching_bindings_and_geometry() {
+        for board in ALL_BOARDS {
+            let state = DeviceState::new(board, false);
+            assert_eq!(state.key_count, board.key_count(), "{board:?}");
+            assert_eq!(
+                state.layouts[0].keys.len(),
+                board.key_count(),
+                "layout keys for {board:?}"
+            );
+            for layer in &state.layers {
+                assert_eq!(
+                    layer.bindings.len(),
+                    board.key_count(),
+                    "{board:?} layer {}",
+                    layer.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn trackball_simulators_leave_a_centre_gap() {
+        // The gap is where a trackball module sits; it must contain no keys so
+        // the layout renders as an opening between the halves.
+        for (layout, gap) in [
+            (lily58_geometry(), 6.2_f32..9.3_f32),
+            (split46_geometry(), 6.1_f32..7.9_f32),
+        ] {
+            assert!(
+                layout.keys.iter().all(|key| !gap.contains(&key.x)),
+                "{} has keys inside the centre gap",
+                layout.name
+            );
+        }
+    }
+
+    #[test]
+    fn trackball_boards_expose_the_usual_layers() {
+        for board in [SimulatedBoard::Lily58, SimulatedBoard::Split46] {
+            let state = DeviceState::new(board, false);
+            let names: Vec<&str> = state
+                .layers
+                .iter()
+                .map(|layer| layer.name.as_str())
+                .collect();
+            assert_eq!(names, ["Base", "Lower", "Raise", "Adjust", "Media"]);
+        }
+    }
 }

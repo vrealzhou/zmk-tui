@@ -110,6 +110,16 @@ mod tests {
     }
 
     #[test]
+    fn simulate_accepts_trackball_boards() {
+        let lily = Cli::try_parse_from(["zmk-tui", "--simulate", "lily58"]).expect("parse");
+        assert_eq!(lily.simulate, Some(SimulatedBoard::Lily58));
+        let split = Cli::try_parse_from(["zmk-tui", "--simulate", "split46"]).expect("parse");
+        assert_eq!(split.simulate, Some(SimulatedBoard::Split46));
+        let short = Cli::try_parse_from(["zmk-tui", "--simulate", "58"]).expect("parse");
+        assert_eq!(short.simulate, Some(SimulatedBoard::Lily58));
+    }
+
+    #[test]
     fn no_simulate_flag_is_none() {
         let cli = Cli::try_parse_from(["zmk-tui"]).expect("parse");
         assert_eq!(cli.simulate, None);

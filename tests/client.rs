@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use zmk_tui::client::{StudioClient, StudioError, StudioEvent};
+use zmk_tui::keycodes;
 use zmk_tui::model::{Binding, LockState};
 use zmk_tui::simulator::{SimulatedBoard, Simulator};
 
@@ -399,4 +400,50 @@ async fn reselecting_the_active_layout_is_not_an_edit() {
 
     client.set_active_physical_layout(0).await.unwrap();
     assert!(!client.check_unsaved_changes().await.unwrap());
+}
+
+#[tokio::test]
+async fn trackball_simulators_report_editable_layouts() {
+    for (board, name, keys) in [
+        (
+            SimulatedBoard::Lily58,
+            "Lily58 + trackball (simulator)",
+            58usize,
+        ),
+        (
+            SimulatedBoard::Split46,
+            "Split 46 + trackball (simulator)",
+            46usize,
+        ),
+    ] {
+        let (simulator, connection) = Simulator::start(board, false);
+        let client = StudioClient::start(connection);
+
+        assert_eq!(client.get_device_info().await.unwrap().name, name);
+
+        let keymap = client.get_keymap().await.unwrap();
+        assert_eq!(keymap.layers.len(), 5, "{name}");
+        assert_eq!(keymap.layers[0].bindings.len(), keys, "{name}");
+
+        let layouts = client.get_physical_layouts().await.unwrap();
+        assert_eq!(layouts.layouts[0].keys.len(), keys, "{name}");
+
+        // The last thumb position is an ordinary editable key.
+        let gui = keycodes::from_name("RGUI").unwrap().value;
+        let last = Binding {
+            behavior_id: 1001,
+            param1: gui,
+            param2: 0,
+        };
+        client
+            .set_layer_binding(keymap.layers[0].id, keys - 1, last)
+            .await
+            .expect("edit the last thumb key");
+        assert_eq!(
+            client.get_keymap().await.unwrap().layers[0].bindings[keys - 1],
+            last
+        );
+
+        drop(simulator);
+    }
 }

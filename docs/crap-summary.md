@@ -7,7 +7,7 @@ in [`crap-baseline.md`](crap-baseline.md) and [`crap-report.md`](crap-report.md)
 
 | Metric | Baseline | After |
 | --- | ---: | ---: |
-| Functions analysed | 380 | 364 |
+| Functions analysed | 380 | 372 |
 | CRAP > 30 | 22 | 6 |
 | CRAP > 100 | 7 | 3 |
 
@@ -42,7 +42,7 @@ A correctness review pass then split the three remaining core hot spots
 tests for the review's fixes: firmware-faithful parameter validation, layer-name
 length limits, physical-layout refresh after discard, snapshot retry/staleness,
 narrow-terminal rendering and grid-based navigation. Line coverage is now
-**81.54%** with **0** excluded-set functions above CRAP 30.
+**82.37%** with **0** excluded-set functions above CRAP 30.
 
 All three remaining whole-project CRAP > 100 rows are hardware/terminal glue
 (`establish_session`, `spawn_reader`, `spawn_input_thread`) and remain excluded

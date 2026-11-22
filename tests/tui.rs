@@ -1188,3 +1188,51 @@ async fn vertical_navigation_follows_rendered_rows() {
         "Down keeps the same column on the next row"
     );
 }
+
+#[tokio::test]
+async fn trackball_layouts_render_and_navigate() {
+    for (board, name, count) in [
+        (
+            SimulatedBoard::Lily58,
+            "Lily58 + trackball (simulator)",
+            58usize,
+        ),
+        (
+            SimulatedBoard::Split46,
+            "Split 46 + trackball (simulator)",
+            46usize,
+        ),
+    ] {
+        let (mut app, _rx) = connected_app_for(board).await;
+        let editor = app.editor.as_ref().expect("editor");
+        assert_eq!(editor.info.name, name);
+        assert_eq!(editor.keymap.layers.len(), 5);
+        assert_eq!(editor.position_count(), count);
+        assert_eq!(editor.layouts.layouts.len(), 1);
+        assert_eq!(editor.layouts.layouts[0].keys.len(), count);
+
+        let screen = screen_text(&mut app);
+        assert!(screen.contains(name), "{screen}");
+        for layer in ["Base", "Lower", "Raise", "Adjust", "Media"] {
+            assert!(
+                screen.contains(layer),
+                "missing layer {layer} in:\n{screen}"
+            );
+        }
+
+        press(&mut app, KeyCode::End);
+        assert_eq!(app.editor.as_ref().unwrap().selected, count - 1);
+        press(&mut app, KeyCode::Home);
+        assert_eq!(app.editor.as_ref().unwrap().selected, 0);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(
+            app.editor.as_ref().unwrap().selected,
+            12,
+            "Down keeps the same column on the next row"
+        );
+
+        // The trackball's click buttons (if wired as matrix keys) are ordinary
+        // bindings; the last thumb position is editable.
+        assert_editor_key_targets_are_consistent(&mut app);
+    }
+}

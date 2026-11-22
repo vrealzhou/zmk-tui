@@ -201,6 +201,13 @@ keymap {
 Reserved layers are ignored by normal builds but can be activated through
 Studio. The built-in simulators expose Base, Lower, Raise, Adjust and Media.
 
+Four simulated boards are available: `corne` (42 keys), `sofle` (60 positions
+including encoder pushes), `lily58` (58 keys: 4x6 per half plus five thumbs) and
+`split46` (46 keys: 3x6 per half plus five thumbs). The two trackball boards
+leave the centre gap empty: ZMK Studio's physical layout only describes keys, so
+the trackball module itself is firmware-side hardware and is not part of the
+layout data.
+
 Saved Studio settings override the compiled `.keymap` on subsequent boots. `R`
 restores the firmware's stock settings; discarding only reverts to the last
 saved settings.
@@ -244,7 +251,7 @@ cargo clippy --all-targets
 cargo fmt --check
 ```
 
-The suite contains 124 Rust unit/integration tests plus 4 Gherkin scenarios
+The suite contains 130 Rust unit/integration tests plus 4 Gherkin scenarios
 (31 steps). Test targets:
 
 - library unit tests: framing, keycodes, labels, layout, modal state, mouse
@@ -255,7 +262,9 @@ The suite contains 124 Rust unit/integration tests plus 4 Gherkin scenarios
 - `tests/features/`: binding edit/save, unsaved-change quit, layers/boards.
 
 The simulator implements the same wire protocol, lock state, notifications,
-save/discard and layer operations as the firmware.
+save/discard, layer operations, binding-parameter validation and layer-name
+limits as the firmware. Trackball click buttons are modelled as ordinary key
+positions, matching how pointing devices are wired into a ZMK matrix.
 
 ### Quality gate
 

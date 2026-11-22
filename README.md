@@ -28,8 +28,9 @@ For architecture, protocol, testing and contribution details, see the
   resumes automatically when the keyboard unlocks.
 - **Works with the keyboard's layout** — Corne, Sofle or any other ZMK Studio
   keyboard, without a per-board configuration file.
-- **No hardware needed to try it** — the built-in simulator ships with Corne
-  and Sofle.
+- **No hardware needed to try it** — the built-in simulator ships with Corne,
+  Sofle, and two trackball split boards (58 key Lily58-style and 46 key
+  3x6-style).
 
 | Binding: choose behavior | Binding: choose keycode |
 | --- | --- |
@@ -45,6 +46,18 @@ buttons), column stagger, rotated thumb keys, and five layers: Base, Lower,
 Raise, Adjust and Media.
 
 ![Sofle editor](docs/screenshots/sofle-editor.png)
+
+Two more simulated boards cover common trackball layouts. Studio only reports
+key positions, so the trackball itself is firmware-side hardware and renders as
+the empty centre gap between the halves:
+
+- `--simulate lily58` — 58 keys: 4x6 per half plus five thumb keys per half.
+- `--simulate split46` — 46 keys: 3x6 per half plus five thumb keys per half.
+
+A trackball's click buttons are ordinary key positions in the matrix, so they
+are edited like any other binding (for example `&mkp MB1`). Pointer movement,
+DPI, scrolling and acceleration are configured in the firmware devicetree and
+are not exposed by ZMK Studio.
 
 ## Requirements
 
@@ -106,6 +119,8 @@ cargo build --release
 # Try the UI with no keyboard attached
 ./target/release/zmk-tui --simulate           # Corne
 ./target/release/zmk-tui --simulate sofle     # Sofle
+./target/release/zmk-tui --simulate lily58    # 58 key + trackball
+./target/release/zmk-tui --simulate split46   # 46 key + trackball
 ```
 
 `--ble` matches a case-insensitive substring of the device name and fails if
@@ -204,9 +219,17 @@ reserved-layer setup.
 
 ## Known limitations
 
-- Rotated keys are rendered unrotated; navigation still uses physical centres.
+- Rotated keys are rendered unrotated; navigation still uses the rendered grid.
 - Rotary encoder bindings are not exposed by the current Studio protocol.
   Sofle's two encoder push-buttons are ordinary editable key positions.
+- Pointing-device configuration (trackball sensor, DPI, scrolling,
+  acceleration, input processors) is firmware-only and not editable through
+  ZMK Studio; only a trackball's click buttons, when wired as matrix keys, are
+  ordinary bindings. `&mmv`/`&msc` mouse-emulation bindings cannot be written
+  through Studio because the firmware does not advertise parameter metadata for
+  them.
+- The physical layout only describes keys, so a trackball opening is drawn as
+  empty space rather than as a device.
 - A behavior's first advertised parameter signature is used.
 - There is no per-edit undo history; `d` discards all unsaved changes.
 - One keyboard can be edited at a time.
