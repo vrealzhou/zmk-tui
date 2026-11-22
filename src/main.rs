@@ -44,6 +44,10 @@ struct Cli {
     /// Edit the first Vial keyboard over USB raw HID
     #[arg(long, conflicts_with_all = ["port", "ble", "simulate", "simulate_vial"])]
     vial: bool,
+
+    /// Connect automatically when exactly one keyboard is visible
+    #[arg(long)]
+    auto: bool,
 }
 
 #[tokio::main]
@@ -69,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
         simulate: cli.simulate,
         vial,
         scan_vial: true,
-        auto_connect: true,
+        auto_connect: cli.auto,
     })
     .await
 }
@@ -167,5 +171,13 @@ mod tests {
     fn no_simulate_flag_is_none() {
         let cli = Cli::try_parse_from(["zmk-tui"]).expect("parse");
         assert_eq!(cli.simulate, None);
+    }
+
+    #[test]
+    fn auto_connect_is_opt_in() {
+        let cli = Cli::try_parse_from(["zmk-tui"]).expect("parse");
+        assert!(!cli.auto);
+        let cli = Cli::try_parse_from(["zmk-tui", "--auto"]).expect("parse");
+        assert!(cli.auto);
     }
 }

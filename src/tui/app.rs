@@ -48,8 +48,9 @@ pub struct StartOptions {
     /// The binary enables this; library tests keep it off so they never probe
     /// host hardware.
     pub scan_vial: bool,
-    /// Connect immediately when exactly one keyboard is visible. The binary
-    /// enables this; tests keep it off for deterministic startup.
+    /// Opt-in (`--auto`): connect immediately when exactly one keyboard is
+    /// visible. The default stays on the device list so the user can wait for
+    /// a Bluetooth scan and choose between USB/HID and Bluetooth devices.
     pub auto_connect: bool,
 }
 
@@ -2077,6 +2078,20 @@ fn move_list(state: &mut ListState, len: usize, delta: isize) {
 mod tests {
     use super::*;
     use crate::transport::serial::UsbDevice;
+
+    #[test]
+    fn auto_connect_is_off_by_default() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(tx, StartOptions::default());
+        app.connect.usb = vec![UsbEntry::Studio(UsbDevice {
+            path: "/dev/zmk-tui-test".into(),
+            product: Some("Test".into()),
+            manufacturer: None,
+            serial_number: None,
+        })];
+        assert!(!app.try_auto_connect());
+        assert!(app.editor.is_none());
+    }
 
     #[tokio::test]
     async fn auto_connect_dispatches_the_only_candidate() {
