@@ -365,8 +365,13 @@ impl Translator {
             }
             behavior::LT => {
                 let tap = tap_to_qmk8(binding.param2)?;
-                let layer = (binding.param1 as u8) & 0x0F;
-                Some(QK_LAYER_TAP | (u16::from(layer) << 8) | u16::from(tap))
+                // QMK's LT() stores only four layer bits (0..=15); silently
+                // masking a higher layer would write a binding for a different
+                // layer, so reject it instead.
+                let layer = u16::try_from(binding.param1)
+                    .ok()
+                    .filter(|layer| *layer <= 0x0F)?;
+                Some(QK_LAYER_TAP | (layer << 8) | u16::from(tap))
             }
             behavior::MO => Some(self.dialect.momentary() | layer(binding.param1)?),
             behavior::TO => Some(self.dialect.to() | layer(binding.param1)?),
@@ -617,6 +622,19 @@ mod tests {
         };
         assert_eq!(translator.encode(binding), Some(0x021E));
         assert_eq!(translator.encode(translator.decode(0x021E)), Some(0x021E));
+    }
+
+    #[test]
+    fn layer_tap_rejects_layers_that_do_not_fit_qmk_four_bits() {
+        let translator = translator(6);
+        let binding = |layer| Binding {
+            behavior_id: behavior::LT,
+            param1: layer,
+            param2: 0x0007_0004,
+        };
+        assert!(translator.encode(binding(15)).is_some());
+        assert_eq!(translator.encode(binding(16)), None);
+        assert_eq!(translator.encode(binding(31)), None);
     }
 
     #[test]

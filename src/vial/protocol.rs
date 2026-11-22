@@ -33,6 +33,48 @@ pub const SERIAL_MAGIC: &str = "vial:f64c2b3c";
 pub const VIA_PROTOCOL_VERSION: u16 = 0x0009;
 /// Maximum number of bytes handled in one buffer read/write report.
 pub const BUFFER_CHUNK: usize = 28;
+/// Firmware-reported compressed definition size is capped so a broken device
+/// cannot make the editor allocate an unbounded buffer.
+pub const MAX_DEFINITION_SIZE: usize = 1024 * 1024;
+/// The decompressed definition is expected to be small JSON; cap it too.
+pub const MAX_DEFINITION_JSON: usize = 4 * 1024 * 1024;
+/// Maximum dynamic keymap size (`layers * rows * cols * 2`). The VIA read
+/// buffer command addresses data with a 16-bit offset, so 64 KiB is also the
+/// protocol's hard ceiling.
+pub const MAX_KEYMAP_BYTES: usize = 64 * 1024;
+
+/// A `Write` sink that fails instead of growing past `limit`. XZ has no
+/// built-in output limit, so this is the decompression-bomb guard.
+struct LimitedBuffer {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+
+impl LimitedBuffer {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            limit,
+        }
+    }
+}
+
+impl std::io::Write for LimitedBuffer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.bytes.len().saturating_add(buf.len()) > self.limit {
+            return Err(std::io::Error::other(format!(
+                "decompressed definition exceeds {} bytes",
+                self.limit
+            )));
+        }
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 /// VIA command ids. Values are copied from `quantum/via.h`; note that this
 /// differs from upstream QMK only by which ids are present.
@@ -299,11 +341,22 @@ impl<T: RawHid> VialDevice<T> {
 
     /// Read the whole dynamic keymap as `layers * rows * cols` big-endian u16s.
     pub fn keymap(&mut self, layers: u8, rows: u8, cols: u8) -> Result<Vec<u16>> {
-        let bytes = usize::from(layers) * usize::from(rows) * usize::from(cols) * 2;
+        let cells = usize::from(layers) * usize::from(rows) * usize::from(cols);
+        let bytes = cells.checked_mul(2).ok_or_else(|| {
+            VialError::Unexpected("keymap dimensions overflow the reported size".into())
+        })?;
+        if bytes > MAX_KEYMAP_BYTES {
+            return Err(VialError::Unexpected(format!(
+                "keymap needs {bytes} bytes, above the {MAX_KEYMAP_BYTES}-byte limit"
+            )));
+        }
         let mut buffer = Vec::with_capacity(bytes);
         while buffer.len() < bytes {
             let size = (bytes - buffer.len()).min(BUFFER_CHUNK);
-            let chunk = self.keymap_buffer(buffer.len() as u16, size)?;
+            let offset = u16::try_from(buffer.len()).map_err(|_| {
+                VialError::Unexpected("keymap offset does not fit the protocol".into())
+            })?;
+            let chunk = self.keymap_buffer(offset, size)?;
             buffer.extend_from_slice(&chunk);
         }
         Ok(buffer
@@ -332,19 +385,27 @@ impl<T: RawHid> VialDevice<T> {
                 "firmware reports an empty keyboard definition".into(),
             ));
         }
+        if size > MAX_DEFINITION_SIZE {
+            return Err(VialError::Definition(format!(
+                "firmware reports a {size}-byte definition, above the \
+                 {MAX_DEFINITION_SIZE}-byte limit"
+            )));
+        }
         let mut compressed = Vec::with_capacity(size);
         for page in 0..size.div_ceil(REPORT_SIZE) {
-            let page = page as u16;
+            let page = u16::try_from(page).map_err(|_| {
+                VialError::Definition("keyboard definition spans too many HID pages".into())
+            })?;
             let [lo, hi] = page.to_le_bytes();
             let response = self.send_vial(vial_command::GET_DEFINITION, &[lo, hi])?;
             let take = (size - compressed.len()).min(REPORT_SIZE);
             compressed.extend_from_slice(&response[..take]);
         }
-        let mut json = Vec::new();
+        let mut json = LimitedBuffer::new(MAX_DEFINITION_JSON);
         lzma_rs::xz_decompress(&mut std::io::Cursor::new(compressed), &mut json).map_err(
             |error| VialError::Definition(format!("cannot decompress definition: {error}")),
         )?;
-        Ok(json)
+        Ok(json.bytes)
     }
 
     /// `vial_get_unlock_status`. The first byte is the lock flag; the second
@@ -492,6 +553,27 @@ mod tests {
         };
         let error = VialDevice::new(&mut fake).layer_count().unwrap_err();
         assert!(matches!(error, VialError::Unexpected(_)));
+    }
+
+    #[test]
+    fn oversized_definition_and_keymap_are_rejected() {
+        let mut response = [0u8; REPORT_SIZE];
+        response[..4].copy_from_slice(&((MAX_DEFINITION_SIZE as u32) + 1).to_le_bytes());
+        let mut fake = Fake {
+            response,
+            last: None,
+        };
+        let error = VialDevice::new(&mut fake).definition_json().unwrap_err();
+        assert!(matches!(error, VialError::Definition(_)), "{error:?}");
+
+        let mut fake = Fake {
+            response: [0u8; REPORT_SIZE],
+            last: None,
+        };
+        let error = VialDevice::new(&mut fake)
+            .keymap(255, 255, 255)
+            .unwrap_err();
+        assert!(matches!(error, VialError::Unexpected(_)), "{error:?}");
     }
 
     #[test]

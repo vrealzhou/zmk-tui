@@ -22,6 +22,7 @@ use crate::tui::connection::{
 };
 use crate::tui::modals::{
     BindingWizard, ConfirmModal, LayerModal, LayoutModal, Modal, UiAction, UnlockModal,
+    WarningsModal,
 };
 use crate::tui::mouse::{ListKind, MouseMap, MouseTarget};
 
@@ -62,15 +63,13 @@ pub enum AfterSave {
     Devices,
 }
 
-pub enum Msg {
-    Key(KeyEvent),
-    Mouse(MouseEvent),
-    Tick,
-    /// The terminal input thread stopped (stdin closed or a read error).
-    InputClosed,
-    UsbDevices(Vec<UsbEntry>),
-    BluetoothDevices(Result<Vec<ble::BleDevice>, String>),
-    ConnectResult(Result<Connected, String>),
+/// A completion or notification that belongs to one connected keyboard.
+///
+/// These messages are wrapped in [`Msg::Session`] together with the session
+/// that spawned the work. A late completion from a previous keyboard can then
+/// be discarded instead of mutating the editor for the new connection.
+#[derive(Debug)]
+pub enum SessionMsg {
     DeviceEvent(StudioEvent),
     Snapshot(Result<Snapshot, StudioError>),
     BindingSet {
@@ -78,6 +77,8 @@ pub enum Msg {
         layer_id: u32,
         position: usize,
         binding: Binding,
+        /// Dirty state before the optimistic mutation, restored on failure.
+        dirty_before: bool,
     },
     Saved {
         result: Result<(), StudioError>,
@@ -91,26 +92,51 @@ pub enum Msg {
     /// A keymap and physical-layout refresh, used after a discard because the
     /// firmware also reverts its physical-layout selection.
     EditRefreshed(Result<(Keymap, PhysicalLayouts), StudioError>),
-    LayerAdded(Result<u32, StudioError>),
+    LayerAdded {
+        result: Result<u32, StudioError>,
+        dirty_before: bool,
+    },
     LayerRemoved {
         result: Result<(), StudioError>,
         index: usize,
+        dirty_before: bool,
     },
     LayerMoved {
         result: Result<Keymap, StudioError>,
         to: usize,
+        dirty_before: bool,
     },
     LayerRenamed {
         result: Result<(), StudioError>,
         layer_id: u32,
         name: String,
+        dirty_before: bool,
     },
     LayoutChanged {
         result: Result<Keymap, StudioError>,
         index: usize,
+        /// `None` when selecting the active layout is a no-op.
+        dirty_before: Option<bool>,
     },
     LockPolled(Result<LockState, StudioError>),
     ResetSettings(Result<(), StudioError>),
+}
+
+pub enum Msg {
+    Key(KeyEvent),
+    Mouse(MouseEvent),
+    Tick,
+    /// The terminal input thread stopped (stdin closed or a read error).
+    InputClosed,
+    UsbDevices(Vec<UsbEntry>),
+    BluetoothDevices(Result<Vec<ble::BleDevice>, String>),
+    ConnectResult(Result<Connected, String>),
+    /// A message tied to the connection identified by `session_id`. Stale
+    /// sessions are ignored by [`App::handle`].
+    Session {
+        session_id: u64,
+        event: SessionMsg,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,6 +183,9 @@ pub struct EditorState {
     pub dirty: bool,
     pub locked: bool,
     pub keymap_loaded: bool,
+    /// Non-fatal problems reported while loading the keymap/catalog; available
+    /// from the warnings dialog instead of being reduced to a count.
+    pub warnings: Vec<String>,
 }
 
 impl EditorState {
@@ -179,6 +208,7 @@ impl EditorState {
             dirty: snapshot.dirty,
             locked,
             keymap_loaded: has_snapshot,
+            warnings: snapshot.warnings,
         };
         editor.clamp();
         editor
@@ -290,10 +320,16 @@ pub struct App {
     pub keyboard_viewport: layout::Viewport,
     last_click: Option<(MouseTarget, Instant)>,
     pub start: StartOptions,
+    /// Identity of the currently connected keyboard. Zero while on the connect
+    /// screen; set from [`Connected::session_id`] when a connection succeeds.
+    pub session_id: u64,
     auto_connect: bool,
     simulator: Option<Simulator>,
     connect_inflight: bool,
     scanning_inflight: bool,
+    /// A background USB/HID enumeration is running. Vial probing opens raw-HID
+    /// interfaces synchronously, so it must not run on the UI thread.
+    usb_scan_inflight: bool,
     lock_poll_inflight: bool,
     last_lock_poll: Instant,
     snapshot_retry_at: Option<Instant>,
@@ -322,10 +358,12 @@ impl App {
             last_click: None,
             auto_connect: start.auto_connect,
             start,
+            session_id: 0,
             simulator: None,
             connect_inflight: false,
             lock_poll_inflight: false,
             scanning_inflight: false,
+            usb_scan_inflight: false,
             last_lock_poll: Instant::now(),
             snapshot_retry_at: None,
             pending_layer_select: None,
@@ -337,11 +375,24 @@ impl App {
 
     /// Record that a local keymap mutation is in flight: the keymap is now
     /// unsaved (even before the device confirms) and any snapshot requested
-    /// earlier becomes stale.
-    fn begin_mutation(&mut self) {
+    /// earlier becomes stale. Returns the previous dirty state so a failed
+    /// request can roll the optimistic change back.
+    fn begin_mutation(&mut self) -> bool {
         self.mutation_generation = self.mutation_generation.wrapping_add(1);
-        if let Some(editor) = &mut self.editor {
-            editor.dirty = true;
+        match &mut self.editor {
+            Some(editor) => {
+                let previous = editor.dirty;
+                editor.dirty = true;
+                previous
+            }
+            None => false,
+        }
+    }
+
+    /// Undo the optimistic dirty flag after a mutation failed.
+    fn restore_dirty(&mut self, dirty_before: Option<bool>) {
+        if let (Some(editor), Some(dirty)) = (&mut self.editor, dirty_before) {
+            editor.dirty = dirty;
         }
     }
 
@@ -372,9 +423,6 @@ impl App {
             return;
         }
         self.refresh_usb();
-        if self.try_auto_connect() {
-            return;
-        }
         self.spawn_bluetooth_scan();
     }
 
@@ -384,31 +432,26 @@ impl App {
             Msg::Mouse(mouse) => self.handle_mouse(mouse),
             Msg::Tick => self.on_tick(),
             Msg::InputClosed => self.should_quit = true,
-            message @ (Msg::UsbDevices(_)
-            | Msg::BluetoothDevices(_)
-            | Msg::ConnectResult(_)
-            | Msg::DeviceEvent(_)) => self.handle_connection_message(message),
-            message @ (Msg::Snapshot(_)
-            | Msg::BindingSet { .. }
-            | Msg::Saved { .. }
-            | Msg::Discarded { .. }
-            | Msg::KeymapRefreshed(_)
-            | Msg::EditRefreshed(_)) => self.handle_edit_message(message),
-            message @ (Msg::LayerAdded(_)
-            | Msg::LayerRemoved { .. }
-            | Msg::LayerMoved { .. }
-            | Msg::LayerRenamed { .. }
-            | Msg::LayoutChanged { .. }
-            | Msg::LockPolled(_)
-            | Msg::ResetSettings(_)) => self.handle_layer_message(message),
+            message @ (Msg::UsbDevices(_) | Msg::BluetoothDevices(_) | Msg::ConnectResult(_)) => {
+                self.handle_connection_message(message)
+            }
+            Msg::Session { session_id, event } => {
+                // A completion from a keyboard we already left must not touch
+                // the editor for the next one.
+                if session_id != 0 && session_id == self.session_id {
+                    self.handle_session_message(event);
+                }
+            }
         }
     }
 
     fn handle_connection_message(&mut self, message: Msg) {
         match message {
             Msg::UsbDevices(devices) => {
+                self.usb_scan_inflight = false;
                 self.connect.usb = devices;
                 self.clamp_connect_selection();
+                self.try_auto_connect();
             }
             Msg::BluetoothDevices(result) => {
                 self.scanning_inflight = false;
@@ -428,29 +471,48 @@ impl App {
                 }
             }
             Msg::ConnectResult(result) => self.handle_connect_result(result),
-            Msg::DeviceEvent(event) => self.handle_device_event(event),
             _ => unreachable!("only connection messages reach this handler"),
         }
     }
 
-    fn handle_edit_message(&mut self, message: Msg) {
+    fn handle_session_message(&mut self, message: SessionMsg) {
+        match message {
+            message @ (SessionMsg::Snapshot(_)
+            | SessionMsg::BindingSet { .. }
+            | SessionMsg::Saved { .. }
+            | SessionMsg::Discarded { .. }
+            | SessionMsg::KeymapRefreshed(_)
+            | SessionMsg::EditRefreshed(_)) => self.handle_edit_message(message),
+            message @ (SessionMsg::LayerAdded { .. }
+            | SessionMsg::LayerRemoved { .. }
+            | SessionMsg::LayerMoved { .. }
+            | SessionMsg::LayerRenamed { .. }
+            | SessionMsg::LayoutChanged { .. }
+            | SessionMsg::LockPolled(_)
+            | SessionMsg::ResetSettings(_)) => self.handle_layer_message(message),
+            SessionMsg::DeviceEvent(event) => self.handle_device_event(event),
+        }
+    }
+
+    fn handle_edit_message(&mut self, message: SessionMsg) {
         // A completion that arrives after the keyboard disconnected must not
         // touch (or toast about) the now-empty editor.
         if self.editor.is_none() {
             return;
         }
         match message {
-            Msg::Snapshot(result) => self.handle_snapshot(result),
-            Msg::BindingSet {
+            SessionMsg::Snapshot(result) => self.handle_snapshot(result),
+            SessionMsg::BindingSet {
                 result,
                 layer_id,
                 position,
                 binding,
-            } => self.finish_binding_set(result, layer_id, position, binding),
-            Msg::Saved { result, then } => self.finish_saved(result, then),
-            Msg::Discarded { result, then } => self.finish_discarded(result, then),
-            Msg::KeymapRefreshed(result) => self.finish_keymap_refresh(result),
-            Msg::EditRefreshed(result) => self.finish_edit_refresh(result),
+                dirty_before,
+            } => self.finish_binding_set(result, layer_id, position, binding, dirty_before),
+            SessionMsg::Saved { result, then } => self.finish_saved(result, then),
+            SessionMsg::Discarded { result, then } => self.finish_discarded(result, then),
+            SessionMsg::KeymapRefreshed(result) => self.finish_keymap_refresh(result),
+            SessionMsg::EditRefreshed(result) => self.finish_edit_refresh(result),
             _ => unreachable!("only edit messages reach this handler"),
         }
     }
@@ -461,8 +523,10 @@ impl App {
         layer_id: u32,
         position: usize,
         binding: Binding,
+        dirty_before: bool,
     ) {
         if let Err(error) = result {
+            self.restore_dirty(Some(dirty_before));
             self.handle_studio_error(error);
             return;
         }
@@ -571,39 +635,64 @@ impl App {
         self.busy = None;
     }
 
-    fn handle_layer_message(&mut self, message: Msg) {
+    fn handle_layer_message(&mut self, message: SessionMsg) {
         if self.editor.is_none() {
             return;
         }
         match message {
-            Msg::LayerAdded(result) => self.finish_layer_added(result),
-            Msg::LayerRemoved { result, index } => self.finish_layer_removed(result, index),
-            Msg::LayerMoved { result, to } => self.finish_layer_moved(result, to),
-            Msg::LayerRenamed {
+            SessionMsg::LayerAdded {
+                result,
+                dirty_before,
+            } => self.finish_layer_added(result, dirty_before),
+            SessionMsg::LayerRemoved {
+                result,
+                index,
+                dirty_before,
+            } => self.finish_layer_removed(result, index, dirty_before),
+            SessionMsg::LayerMoved {
+                result,
+                to,
+                dirty_before,
+            } => self.finish_layer_moved(result, to, dirty_before),
+            SessionMsg::LayerRenamed {
                 result,
                 layer_id,
                 name,
-            } => self.finish_layer_renamed(result, layer_id, name),
-            Msg::LayoutChanged { result, index } => self.finish_layout_changed(result, index),
-            Msg::LockPolled(result) => self.handle_lock_polled(result),
-            Msg::ResetSettings(result) => self.finish_reset_settings(result),
+                dirty_before,
+            } => self.finish_layer_renamed(result, layer_id, name, dirty_before),
+            SessionMsg::LayoutChanged {
+                result,
+                index,
+                dirty_before,
+            } => self.finish_layout_changed(result, index, dirty_before),
+            SessionMsg::LockPolled(result) => self.handle_lock_polled(result),
+            SessionMsg::ResetSettings(result) => self.finish_reset_settings(result),
             _ => unreachable!("only layer/session messages reach this handler"),
         }
     }
 
-    fn finish_layer_added(&mut self, result: Result<u32, StudioError>) {
+    fn finish_layer_added(&mut self, result: Result<u32, StudioError>, dirty_before: bool) {
         match result {
             Ok(index) => {
                 self.pending_layer_select = Some(index as usize);
                 self.spawn_refresh_keymap();
                 self.toast("Layer added", StatusKind::Success);
             }
-            Err(error) => self.handle_studio_error(error),
+            Err(error) => {
+                self.restore_dirty(Some(dirty_before));
+                self.handle_studio_error(error);
+            }
         }
     }
 
-    fn finish_layer_removed(&mut self, result: Result<(), StudioError>, index: usize) {
+    fn finish_layer_removed(
+        &mut self,
+        result: Result<(), StudioError>,
+        index: usize,
+        dirty_before: bool,
+    ) {
         if let Err(error) = result {
+            self.restore_dirty(Some(dirty_before));
             self.handle_studio_error(error);
             return;
         }
@@ -618,10 +707,16 @@ impl App {
         self.toast("Layer removed", StatusKind::Success);
     }
 
-    fn finish_layer_moved(&mut self, result: Result<Keymap, StudioError>, to: usize) {
+    fn finish_layer_moved(
+        &mut self,
+        result: Result<Keymap, StudioError>,
+        to: usize,
+        dirty_before: bool,
+    ) {
         let keymap = match result {
             Ok(keymap) => keymap,
             Err(error) => {
+                self.restore_dirty(Some(dirty_before));
                 self.handle_studio_error(error);
                 return;
             }
@@ -641,8 +736,10 @@ impl App {
         result: Result<(), StudioError>,
         layer_id: u32,
         name: String,
+        dirty_before: bool,
     ) {
         if let Err(error) = result {
+            self.restore_dirty(Some(dirty_before));
             self.handle_studio_error(error);
             return;
         }
@@ -661,10 +758,16 @@ impl App {
         self.toast("Layer renamed", StatusKind::Success);
     }
 
-    fn finish_layout_changed(&mut self, result: Result<Keymap, StudioError>, index: usize) {
+    fn finish_layout_changed(
+        &mut self,
+        result: Result<Keymap, StudioError>,
+        index: usize,
+        dirty_before: Option<bool>,
+    ) {
         let keymap = match result {
             Ok(keymap) => keymap,
             Err(error) => {
+                self.restore_dirty(dirty_before);
                 self.handle_studio_error(error);
                 return;
             }
@@ -687,11 +790,22 @@ impl App {
             self.handle_studio_error(error);
             return;
         }
+        let keymap_only = self
+            .editor
+            .as_ref()
+            .is_some_and(|editor| editor.kind.is_vial());
         if let Some(editor) = &mut self.editor {
             editor.dirty = false;
         }
         self.busy = None;
-        self.toast("Stock settings restored", StatusKind::Success);
+        self.toast(
+            if keymap_only {
+                "Compiled keymap restored"
+            } else {
+                "Stock settings restored"
+            },
+            StatusKind::Success,
+        );
         self.spawn_snapshot_load();
     }
 
@@ -813,10 +927,15 @@ impl App {
             KeyCode::Char('u') => self.open_unlock_modal(),
             KeyCode::Char('R') => {
                 if self.require_unlocked() {
-                    self.modal = Some(Modal::Confirm(ConfirmModal::reset_settings()));
+                    let keymap_only = self
+                        .editor
+                        .as_ref()
+                        .is_some_and(|editor| editor.kind.is_vial());
+                    self.modal = Some(Modal::Confirm(ConfirmModal::reset_settings(keymap_only)));
                 }
             }
             KeyCode::Char('?') => self.modal = Some(Modal::Help),
+            KeyCode::Char('W') => self.open_warnings(),
             KeyCode::Char('q') => self.request_quit(),
             KeyCode::Esc => self.status = None,
             _ => {}
@@ -1311,6 +1430,17 @@ impl App {
         self.spawn_lock_poll();
     }
 
+    fn open_warnings(&mut self) {
+        let Some(editor) = &self.editor else {
+            return;
+        };
+        if editor.warnings.is_empty() {
+            self.toast("No warnings for this keyboard", StatusKind::Info);
+            return;
+        }
+        self.modal = Some(Modal::Warnings(WarningsModal::new(editor.warnings.clone())));
+    }
+
     fn require_unlocked(&mut self) -> bool {
         if let Some(editor) = &self.editor {
             if editor.locked {
@@ -1339,6 +1469,7 @@ impl App {
     /// the next screen scans again instead of reusing stale state.
     fn leave_editor(&mut self) {
         self.auto_connect = false;
+        self.session_id = 0;
         self.editor = None;
         self.modal = None;
         self.busy = None;
@@ -1369,15 +1500,30 @@ impl App {
     // ------------------------------------------------------------------
 
     fn refresh_usb(&mut self) {
-        self.connect.usb = if self.start.scan_vial {
-            list_usb_entries()
-        } else {
-            serial::list_usb_devices()
-                .into_iter()
-                .map(UsbEntry::Studio)
-                .collect()
-        };
-        self.clamp_connect_selection();
+        if self.usb_scan_inflight {
+            return;
+        }
+        self.usb_scan_inflight = true;
+        // Serial enumeration is cheap, but classifying raw-HID interfaces as
+        // Vial opens each candidate and can block for the HID read timeout.
+        // Keep that work off the UI thread.
+        let scan_vial = self.start.scan_vial;
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let devices = tokio::task::spawn_blocking(move || {
+                if scan_vial {
+                    list_usb_entries()
+                } else {
+                    serial::list_usb_devices()
+                        .into_iter()
+                        .map(UsbEntry::Studio)
+                        .collect()
+                }
+            })
+            .await
+            .unwrap_or_default();
+            let _ = tx.send(Msg::UsbDevices(devices));
+        });
     }
 
     fn clamp_connect_selection(&mut self) {
@@ -1420,7 +1566,13 @@ impl App {
     }
 
     fn try_auto_connect(&mut self) -> bool {
-        if !self.auto_connect || self.connect_inflight || self.editor.is_some() {
+        // Wait for the USB list so a USB keyboard keeps priority over a
+        // Bluetooth device that happens to be discovered first.
+        if !self.auto_connect
+            || self.connect_inflight
+            || self.usb_scan_inflight
+            || self.editor.is_some()
+        {
             return false;
         }
         let Some(choice) = self.auto_connect_choice() else {
@@ -1523,6 +1675,7 @@ impl App {
     fn handle_connect_result(&mut self, result: Result<Connected, String>) {
         self.connect_inflight = false;
         self.busy = None;
+        self.session_id = 0;
         self.snapshot_retry_at = None;
         self.snapshot_attempts = 0;
         self.pending_layer_select = None;
@@ -1540,6 +1693,8 @@ impl App {
                 self.spawn_bluetooth_scan();
             }
             Ok(connected) => {
+                let session_id = connected.session_id;
+                let snapshot_error = connected.snapshot_error.clone();
                 let warnings = connected
                     .snapshot
                     .as_ref()
@@ -1560,6 +1715,7 @@ impl App {
                 let locked = editor.locked;
                 let layout = editor.active_layout_name().to_string();
                 self.editor = Some(editor);
+                self.session_id = session_id;
                 self.connect = ConnectState::default();
                 self.modal = if locked {
                     Some(Modal::Unlock(UnlockModal::default()))
@@ -1570,7 +1726,14 @@ impl App {
                     self.spawn_snapshot_load();
                 }
                 self.last_lock_poll = Instant::now();
-                if !warnings.is_empty() {
+                if let Some(error) = snapshot_error {
+                    self.toast(
+                        format!(
+                            "Connected to {name}; could not read the keymap ({error}) — retrying"
+                        ),
+                        StatusKind::Warning,
+                    );
+                } else if !warnings.is_empty() {
                     self.toast(
                         format!("Connected to {name}; {} warning(s)", warnings.len()),
                         StatusKind::Warning,
@@ -1656,6 +1819,7 @@ impl App {
         if self.editor.is_none() {
             return;
         }
+        self.session_id = 0;
         self.editor = None;
         self.modal = None;
         self.busy = None;
@@ -1743,10 +1907,14 @@ impl App {
         };
         self.lock_poll_inflight = true;
         self.last_lock_poll = Instant::now();
+        let session_id = self.session_id;
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let result = client.get_lock_state().await;
-            let _ = tx.send(Msg::LockPolled(result));
+            let _ = tx.send(Msg::Session {
+                session_id,
+                event: SessionMsg::LockPolled(result),
+            });
         });
     }
 
@@ -1769,10 +1937,14 @@ impl App {
         }
         self.snapshot_generation = self.mutation_generation;
         self.busy = Some("Reading keymap from keyboard…".into());
+        let session_id = self.session_id;
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let result = load_snapshot(&client).await;
-            let _ = tx.send(Msg::Snapshot(result));
+            let _ = tx.send(Msg::Session {
+                session_id,
+                event: SessionMsg::Snapshot(result),
+            });
         });
     }
 
@@ -1792,6 +1964,7 @@ impl App {
                     }
                     editor.layouts = snapshot.layouts;
                     editor.catalog = snapshot.catalog;
+                    editor.warnings = warnings.clone();
                     editor.keymap_loaded = true;
                     editor.clamp();
                 }
@@ -1850,16 +2023,21 @@ impl App {
         let Some(client) = self.client() else {
             return;
         };
-        self.begin_mutation();
+        let dirty_before = self.begin_mutation();
         self.busy = Some("Updating binding…".into());
+        let session_id = self.session_id;
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let result = client.set_layer_binding(layer_id, position, binding).await;
-            let _ = tx.send(Msg::BindingSet {
-                result,
-                layer_id,
-                position,
-                binding,
+            let _ = tx.send(Msg::Session {
+                session_id,
+                event: SessionMsg::BindingSet {
+                    result,
+                    layer_id,
+                    position,
+                    binding,
+                    dirty_before,
+                },
             });
         });
     }
@@ -1873,10 +2051,14 @@ impl App {
             AfterSave::Devices => "Saving before returning…".into(),
             AfterSave::Stay => "Saving…".into(),
         });
+        let session_id = self.session_id;
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let result = client.save_changes().await;
-            let _ = tx.send(Msg::Saved { result, then });
+            let _ = tx.send(Msg::Session {
+                session_id,
+                event: SessionMsg::Saved { result, then },
+            });
         });
     }
 
@@ -1885,10 +2067,14 @@ impl App {
             return;
         };
         self.busy = Some("Discarding changes…".into());
+        let session_id = self.session_id;
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let result = client.discard_changes().await;
-            let _ = tx.send(Msg::Discarded { result, then });
+            let _ = tx.send(Msg::Session {
+                session_id,
+                event: SessionMsg::Discarded { result, then },
+            });
         });
     }
 
@@ -1896,11 +2082,26 @@ impl App {
         let Some(client) = self.client() else {
             return;
         };
-        self.busy = Some("Restoring stock settings…".into());
+        let keymap_only = self
+            .editor
+            .as_ref()
+            .is_some_and(|editor| editor.kind.is_vial());
+        self.busy = Some(
+            if keymap_only {
+                "Restoring compiled keymap…"
+            } else {
+                "Restoring stock settings…"
+            }
+            .into(),
+        );
+        let session_id = self.session_id;
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let result = client.reset_settings().await;
-            let _ = tx.send(Msg::ResetSettings(result));
+            let _ = tx.send(Msg::Session {
+                session_id,
+                event: SessionMsg::ResetSettings(result),
+            });
         });
     }
 
@@ -1908,12 +2109,19 @@ impl App {
         let Some(client) = self.client() else {
             return;
         };
-        self.begin_mutation();
+        let dirty_before = self.begin_mutation();
         self.busy = Some("Adding layer…".into());
+        let session_id = self.session_id;
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let result = client.add_layer().await;
-            let _ = tx.send(Msg::LayerAdded(result));
+            let _ = tx.send(Msg::Session {
+                session_id,
+                event: SessionMsg::LayerAdded {
+                    result,
+                    dirty_before,
+                },
+            });
         });
     }
 
@@ -1921,12 +2129,20 @@ impl App {
         let Some(client) = self.client() else {
             return;
         };
-        self.begin_mutation();
+        let dirty_before = self.begin_mutation();
         self.busy = Some("Removing layer…".into());
+        let session_id = self.session_id;
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let result = client.remove_layer(index).await;
-            let _ = tx.send(Msg::LayerRemoved { result, index });
+            let _ = tx.send(Msg::Session {
+                session_id,
+                event: SessionMsg::LayerRemoved {
+                    result,
+                    index,
+                    dirty_before,
+                },
+            });
         });
     }
 
@@ -1934,12 +2150,20 @@ impl App {
         let Some(client) = self.client() else {
             return;
         };
-        self.begin_mutation();
+        let dirty_before = self.begin_mutation();
         self.busy = Some("Moving layer…".into());
+        let session_id = self.session_id;
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let result = client.move_layer(from, to).await;
-            let _ = tx.send(Msg::LayerMoved { result, to });
+            let _ = tx.send(Msg::Session {
+                session_id,
+                event: SessionMsg::LayerMoved {
+                    result,
+                    to,
+                    dirty_before,
+                },
+            });
         });
     }
 
@@ -1947,16 +2171,21 @@ impl App {
         let Some(client) = self.client() else {
             return;
         };
-        self.begin_mutation();
+        let dirty_before = self.begin_mutation();
         self.busy = Some("Renaming layer…".into());
+        let session_id = self.session_id;
         let tx = self.tx.clone();
         let sent_name = name.clone();
         tokio::spawn(async move {
             let result = client.set_layer_props(layer_id, &sent_name).await;
-            let _ = tx.send(Msg::LayerRenamed {
-                result,
-                layer_id,
-                name,
+            let _ = tx.send(Msg::Session {
+                session_id,
+                event: SessionMsg::LayerRenamed {
+                    result,
+                    layer_id,
+                    name,
+                    dirty_before,
+                },
             });
         });
     }
@@ -1965,18 +2194,24 @@ impl App {
         let Some(client) = self.client() else {
             return;
         };
-        if self
+        let changed = self
             .editor
             .as_ref()
-            .is_some_and(|editor| editor.layouts.active_index != index)
-        {
-            self.begin_mutation();
-        }
+            .is_some_and(|editor| editor.layouts.active_index != index);
+        let dirty_before = changed.then(|| self.begin_mutation());
         self.busy = Some("Changing physical layout…".into());
+        let session_id = self.session_id;
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let result = client.set_active_physical_layout(index).await;
-            let _ = tx.send(Msg::LayoutChanged { result, index });
+            let _ = tx.send(Msg::Session {
+                session_id,
+                event: SessionMsg::LayoutChanged {
+                    result,
+                    index,
+                    dirty_before,
+                },
+            });
         });
     }
 
@@ -1985,10 +2220,14 @@ impl App {
             return;
         };
         self.busy = Some("Refreshing keymap…".into());
+        let session_id = self.session_id;
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let result = client.get_keymap().await;
-            let _ = tx.send(Msg::KeymapRefreshed(result));
+            let _ = tx.send(Msg::Session {
+                session_id,
+                event: SessionMsg::KeymapRefreshed(result),
+            });
         });
     }
 
@@ -2001,6 +2240,7 @@ impl App {
             return;
         };
         self.busy = Some("Refreshing keymap…".into());
+        let session_id = self.session_id;
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let result = async {
@@ -2014,7 +2254,10 @@ impl App {
                 Ok((keymap, layouts))
             }
             .await;
-            let _ = tx.send(Msg::EditRefreshed(result));
+            let _ = tx.send(Msg::Session {
+                session_id,
+                event: SessionMsg::EditRefreshed(result),
+            });
         });
     }
 

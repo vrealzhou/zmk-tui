@@ -327,6 +327,8 @@ impl StudioClient {
         position: usize,
         binding: Binding,
     ) -> Result<(), StudioError> {
+        // ZMK behavior local IDs are 16-bit CRC16 values; the protocol field
+        // is sint32, so every valid ID fits.
         let behavior_id = i32::try_from(binding.behavior_id)
             .map_err(|_| StudioError::Protocol("behavior ID does not fit in i32".into()))?;
         let key_position = i32::try_from(position)
@@ -830,7 +832,10 @@ fn convert_keymap(keymap: zmk::keymap::Keymap) -> Keymap {
                     .bindings
                     .into_iter()
                     .map(|binding| Binding {
-                        behavior_id: binding.behavior_id.max(0) as u32,
+                        // ZMK behavior IDs are 16-bit CRC16 values, so valid
+                        // values are always positive; only a corrupt response
+                        // can fall back to the empty behavior.
+                        behavior_id: u32::try_from(binding.behavior_id).unwrap_or(0),
                         param1: binding.param1,
                         param2: binding.param2,
                     })

@@ -805,6 +805,7 @@ fn render_modal(frame: &mut Frame, area: Rect, app: &mut App, hits: &mut MouseMa
         Modal::Confirm(confirm) => render_confirm(frame, area, confirm, hits),
         Modal::Unlock(unlock) => render_unlock(frame, area, editor, unlock.waiting, tick, hits),
         Modal::Help => render_help(frame, area, hits),
+        Modal::Warnings(warnings) => render_warnings(frame, area, warnings),
     }
 }
 
@@ -1548,9 +1549,50 @@ fn render_unlock(
     );
 }
 
+fn render_warnings(frame: &mut Frame, area: Rect, modal: &mut crate::tui::modals::WarningsModal) {
+    let width = area.width.saturating_sub(8).clamp(44, 84);
+    let height = 20.min(area.height.saturating_sub(2));
+    let rect = modal_rect(area, width, height);
+    frame.render_widget(Clear, rect);
+    let block = modal_block(Line::from(vec![
+        Span::styled(" Warnings ", theme::title()),
+        Span::styled(format!("· {} ", modal.warnings.len()), theme::dim()),
+    ]));
+    let inner = inset(block.inner(rect));
+    frame.render_widget(block, rect);
+
+    let parts = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+    let max_scroll = modal
+        .warnings
+        .len()
+        .saturating_sub(parts[0].height as usize) as u16;
+    modal.scroll = modal.scroll.min(max_scroll);
+    let lines: Vec<Line> = modal
+        .warnings
+        .iter()
+        .enumerate()
+        .map(|(index, warning)| {
+            Line::from(vec![
+                Span::styled(format!("{:>2}  ", index + 1), theme::dim()),
+                Span::styled(warning.clone(), Style::default().fg(theme::TEXT)),
+            ])
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(lines)
+            .scroll((modal.scroll, 0))
+            .wrap(Wrap { trim: false }),
+        parts[0],
+    );
+    frame.render_widget(
+        Paragraph::new(Span::styled("↑↓ scroll · Esc close", theme::dim())),
+        parts[1],
+    );
+}
+
 fn render_help(frame: &mut Frame, area: Rect, hits: &mut MouseMap) {
     let width = area.width.saturating_sub(8).clamp(44, 84);
-    let height = 22.min(area.height.saturating_sub(2));
+    let height = 24.min(area.height.saturating_sub(2));
     let rect = modal_rect(area, width, height);
     frame.render_widget(Clear, rect);
     let block = modal_block(Span::styled(" Keys & notes ", theme::title()));
@@ -1568,15 +1610,16 @@ fn render_help(frame: &mut Frame, area: Rect, hits: &mut MouseMap) {
         Line::from("  L                        layers (add / rename / remove / move)"),
         Line::from("  p                        choose physical layout"),
         Line::from("  u                        unlock instructions"),
+        Line::from("  W                        warnings reported while loading"),
         Line::from(Span::styled("Changes", theme::title())),
         Line::from("  s                        save changes to the keyboard"),
         Line::from("  d                        discard unsaved changes"),
-        Line::from("  R                        restore stock firmware keymap/settings"),
+        Line::from("  R                        restore stock keymap / settings"),
         Line::from("  b                        back to the device list"),
         Line::from("  q / Ctrl-C               quit"),
         Line::from(Span::styled("Notes", theme::title())),
         Line::from("  Edits apply live; only “save” persists them."),
-        Line::from("  Saved Studio settings override the .keymap; R restores stock."),
+        Line::from("  Saved settings override the compiled keymap; R restores the default."),
         Line::from("  Studio is locked until &studio_unlock; BLE needs a host connection."),
         Line::from(Span::styled(
             "Mouse: click select · double-click activate · wheel scroll · Esc/? close",

@@ -31,8 +31,10 @@ impl LockState {
 
 /// One binding at a key position.
 ///
-/// `behavior_id` is a device-local ID (a CRC of the behavior's devicetree
-/// node name), not a stable global constant. Use [`Catalog`] to resolve it.
+/// `behavior_id` is a device-local ID (ZMK uses a 16-bit CRC16 of the behavior's
+/// devicetree node name), not a stable global constant. Use [`Catalog`] to
+/// resolve it. Vial's pseudo behaviors use a private high range because they
+/// never share a catalog with a Studio device.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Binding {
     pub behavior_id: u32,
@@ -86,6 +88,9 @@ impl Keymap {
 }
 
 /// Geometry from `keymap.get_physical_layouts`, in key units.
+///
+/// Rotation fields are kept so the data is not lost, but the terminal
+/// projection in [`crate::layout::compute`] is axis-aligned and ignores them.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct KeyGeometry {
     pub x: f32,

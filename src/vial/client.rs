@@ -33,10 +33,12 @@ impl VialClient {
         Ok(self.info.clone())
     }
 
-    /// Vial's lock guards macros, the bootloader and RESET keycodes, not the
-    /// dynamic keymap. This editor only edits keycodes, so it can work while
-    /// the firmware is locked; reporting `Unlocked` avoids showing a Studio
-    /// unlock dialog that does not apply.
+    /// Vial's lock does not gate the dynamic keymap: Vial GUI edits keycodes
+    /// while locked and only runs its unlock gesture before assigning
+    /// `QK_BOOT`. The firmware's `vial_keycode_firewall` also refuses to execute
+    /// `QK_BOOT` while locked. This editor does not implement the Vial unlock
+    /// UI, so reporting `Unlocked` keeps normal keymap editing available and
+    /// avoids showing a Studio unlock dialog that cannot unlock a Vial board.
     pub async fn get_lock_state(&self) -> Result<LockState, StudioError> {
         Ok(LockState::Unlocked)
     }
@@ -79,6 +81,10 @@ impl VialClient {
         self.keyboard.lock().await.discard().map_err(map_error)
     }
 
+    /// Vial has no "restore settings" RPC; the closest operation is
+    /// `id_dynamic_keymap_reset`, which rewrites only the dynamic keymap from
+    /// the compiled one. Macros, tap dance, combos, key overrides, lighting and
+    /// QMK settings are left alone.
     pub async fn reset_settings(&self) -> Result<(), StudioError> {
         self.keyboard.lock().await.reset_keymap().map_err(map_error)
     }

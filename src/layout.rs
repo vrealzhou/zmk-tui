@@ -143,6 +143,10 @@ pub enum Direction {
 }
 
 /// Lay out keys so that 1u is `unit_cols` columns and `unit_rows` rows wide.
+///
+/// Rotation is deliberately ignored: a terminal cell is axis-aligned. Vial KLE
+/// definitions that rotate thumb clusters are flattened into an adjusted x while
+/// keeping the cluster's row in [`crate::vial::definition`].
 pub fn compute(layout: &PhysicalLayout, viewport: Viewport) -> Grid {
     if layout.keys.is_empty() || viewport.width == 0 || viewport.height == 0 {
         return Grid::default();

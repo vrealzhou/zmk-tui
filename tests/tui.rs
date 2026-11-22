@@ -11,14 +11,16 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
-use zmk_tui::client::{StudioError, StudioEvent};
+use zmk_tui::client::{StudioClient, StudioError, StudioEvent};
+use zmk_tui::device::DeviceClient;
 use zmk_tui::keycodes;
-use zmk_tui::model::{Binding, LockState};
+use zmk_tui::model::{Binding, DeviceInfo, LockState};
 use zmk_tui::simulator::SimulatedBoard;
+use zmk_tui::transport::ConnectionKind;
 use zmk_tui::transport::serial::UsbDevice;
 use zmk_tui::tui::StartOptions;
-use zmk_tui::tui::app::{App, Msg, Panel, StatusKind, VialStart};
-use zmk_tui::tui::connection::{DeviceChoice, Snapshot, UsbEntry};
+use zmk_tui::tui::app::{App, Msg, Panel, SessionMsg, StatusKind, VialStart};
+use zmk_tui::tui::connection::{Connected, DeviceChoice, Snapshot, UsbEntry};
 use zmk_tui::tui::modals::{Modal, Stage, UnlockModal, behavior_items};
 use zmk_tui::tui::mouse::{ListKind, MouseTarget};
 use zmk_tui::tui::render;
@@ -47,6 +49,11 @@ fn screen_text_sized(app: &mut App, width: u16, height: u16) -> String {
 
 fn press(app: &mut App, code: KeyCode) {
     app.handle(Msg::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+}
+
+fn session(app: &mut App, event: SessionMsg) {
+    let session_id = app.session_id;
+    app.handle(Msg::Session { session_id, event });
 }
 
 fn type_text(app: &mut App, text: &str) {
@@ -739,18 +746,23 @@ async fn device_events_update_lock_and_dirty_state() {
     let (mut app, _rx) = connected_app().await;
     let _ = screen_text(&mut app);
 
-    app.handle(Msg::DeviceEvent(StudioEvent::UnsavedChangesChanged(true)));
+    session(
+        &mut app,
+        SessionMsg::DeviceEvent(StudioEvent::UnsavedChangesChanged(true)),
+    );
     assert!(app.editor.as_ref().unwrap().dirty);
 
-    app.handle(Msg::DeviceEvent(StudioEvent::LockStateChanged(
-        LockState::Locked,
-    )));
+    session(
+        &mut app,
+        SessionMsg::DeviceEvent(StudioEvent::LockStateChanged(LockState::Locked)),
+    );
     assert!(app.editor.as_ref().unwrap().locked);
     assert!(matches!(app.modal, Some(Modal::Unlock(_))));
 
-    app.handle(Msg::DeviceEvent(StudioEvent::LockStateChanged(
-        LockState::Unlocked,
-    )));
+    session(
+        &mut app,
+        SessionMsg::DeviceEvent(StudioEvent::LockStateChanged(LockState::Unlocked)),
+    );
     assert!(!app.editor.as_ref().unwrap().locked);
     assert!(app.modal.is_none());
 }
@@ -759,15 +771,15 @@ async fn device_events_update_lock_and_dirty_state() {
 async fn lock_poll_results_clear_or_set_lock_state() {
     let (mut app, _rx) = connected_app().await;
 
-    app.handle(Msg::LockPolled(Ok(LockState::Locked)));
+    session(&mut app, SessionMsg::LockPolled(Ok(LockState::Locked)));
     assert!(app.editor.as_ref().unwrap().locked);
 
     app.modal = Some(Modal::Unlock(UnlockModal::default()));
-    app.handle(Msg::LockPolled(Ok(LockState::Unlocked)));
+    session(&mut app, SessionMsg::LockPolled(Ok(LockState::Unlocked)));
     assert!(!app.editor.as_ref().unwrap().locked);
     assert!(app.modal.is_none());
 
-    app.handle(Msg::LockPolled(Err(StudioError::Timeout)));
+    session(&mut app, SessionMsg::LockPolled(Err(StudioError::Timeout)));
     assert_eq!(
         app.status.as_ref().map(|status| status.kind),
         Some(StatusKind::Error)
@@ -958,25 +970,34 @@ async fn late_completions_do_not_close_other_modals() {
     press(&mut app, KeyCode::Char('?'));
     assert!(matches!(app.modal, Some(Modal::Help)));
 
-    app.handle(Msg::BindingSet {
-        result: Ok(()),
-        layer_id: 0,
-        position: 0,
-        binding: Binding {
-            behavior_id: 1001,
-            param1: a,
-            param2: 0,
+    session(
+        &mut app,
+        SessionMsg::BindingSet {
+            result: Ok(()),
+            layer_id: 0,
+            position: 0,
+            binding: Binding {
+                behavior_id: 1001,
+                param1: a,
+                param2: 0,
+            },
+            dirty_before: false,
         },
-    });
+    );
     assert!(
         matches!(app.modal, Some(Modal::Help)),
         "an in-flight binding update must not dismiss an unrelated dialog"
     );
 
-    app.handle(Msg::LayoutChanged {
-        result: Ok(app.editor.as_ref().unwrap().keymap.clone()),
-        index: 1,
-    });
+    let keymap = app.editor.as_ref().unwrap().keymap.clone();
+    session(
+        &mut app,
+        SessionMsg::LayoutChanged {
+            result: Ok(keymap),
+            index: 1,
+            dirty_before: None,
+        },
+    );
     assert!(matches!(app.modal, Some(Modal::Help)));
 }
 
@@ -1030,7 +1051,7 @@ async fn stale_snapshots_do_not_overwrite_newer_edits() {
         dirty: false,
         warnings: vec![],
     };
-    app.handle(Msg::Snapshot(Ok(snapshot)));
+    session(&mut app, SessionMsg::Snapshot(Ok(snapshot)));
 
     let editor = app.editor.as_ref().unwrap();
     assert_eq!(
@@ -1049,7 +1070,7 @@ async fn failed_keymap_load_is_retried() {
     let (mut app, mut rx) = connected_app().await;
     app.editor.as_mut().unwrap().keymap_loaded = false;
 
-    app.handle(Msg::Snapshot(Err(StudioError::Timeout)));
+    session(&mut app, SessionMsg::Snapshot(Err(StudioError::Timeout)));
     assert!(app.busy.is_none());
 
     tokio::time::sleep(Duration::from_millis(1100)).await;
@@ -1484,4 +1505,109 @@ async fn vial_editor_can_return_to_the_device_list() {
     assert!(app.editor.is_none());
     assert!(app.modal.is_none());
     assert!(!app.should_quit);
+}
+
+#[tokio::test]
+async fn failed_mutations_restore_the_previous_dirty_state() {
+    let (mut app, _rx) = connected_app().await;
+    app.editor.as_mut().unwrap().dirty = true;
+
+    session(
+        &mut app,
+        SessionMsg::BindingSet {
+            result: Err(StudioError::Device("rejected".into())),
+            layer_id: 0,
+            position: 0,
+            binding: Binding::default(),
+            dirty_before: false,
+        },
+    );
+
+    assert!(
+        !app.editor.as_ref().unwrap().dirty,
+        "a failed optimistic edit must not leave the keymap marked unsaved"
+    );
+}
+
+#[tokio::test]
+async fn messages_from_an_old_session_are_ignored() {
+    let (mut app, _rx) = connected_app().await;
+    let old_session = app.session_id;
+    app.session_id = old_session + 1;
+
+    app.handle(Msg::Session {
+        session_id: old_session,
+        event: SessionMsg::DeviceEvent(StudioEvent::LockStateChanged(LockState::Locked)),
+    });
+
+    assert!(!app.editor.as_ref().unwrap().locked);
+    assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn warnings_are_available_in_a_dedicated_modal() {
+    let (mut app, _rx) = connected_app().await;
+    app.editor.as_mut().unwrap().warnings =
+        vec!["3 keycode(s) are shown as raw Vial values and cannot be edited structurally".into()];
+
+    press(&mut app, KeyCode::Char('W'));
+    assert!(matches!(app.modal, Some(Modal::Warnings(_))));
+    let screen = screen_text(&mut app);
+    assert!(screen.contains("Warnings"), "{screen}");
+    assert!(screen.contains("raw Vial values"), "{screen}");
+
+    press(&mut app, KeyCode::Esc);
+    assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn vial_restore_uses_keymap_only_wording() {
+    let (mut app, _rx) = connected_vial_app().await;
+
+    press(&mut app, KeyCode::Char('R'));
+    let screen = screen_text(&mut app);
+    assert!(screen.contains("Restore compiled keymap"), "{screen}");
+    assert!(screen.contains("Macros"), "{screen}");
+    assert!(!screen.contains("Restore stock settings"), "{screen}");
+}
+
+#[tokio::test]
+async fn initial_snapshot_failure_opens_the_editor_and_retries() {
+    let (_simulator, connection) =
+        zmk_tui::simulator::Simulator::start(SimulatedBoard::Corne, false);
+    let client = DeviceClient::Studio(StudioClient::start(connection));
+    let connected = Connected {
+        session_id: 7,
+        client,
+        label: "test".into(),
+        kind: ConnectionKind::Channel,
+        info: DeviceInfo {
+            name: "test".into(),
+            serial_number: vec![],
+        },
+        lock: LockState::Unlocked,
+        snapshot: None,
+        snapshot_error: Some("timeout".into()),
+    };
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut app = App::new(tx, StartOptions::default());
+
+    app.handle(Msg::ConnectResult(Ok(connected)));
+
+    assert!(app.editor.is_some());
+    assert_eq!(app.session_id, 7);
+    assert!(
+        !app.editor.as_ref().unwrap().keymap_loaded,
+        "the editor must stay in the loading state"
+    );
+    assert!(
+        app.busy.is_some(),
+        "the failed initial read must be retried from the editor"
+    );
+    assert!(
+        app.status
+            .as_ref()
+            .is_some_and(|status| status.text.contains("retrying")),
+        "the retry must be visible to the user"
+    );
 }

@@ -54,6 +54,7 @@ pub enum Modal {
     Unlock(UnlockModal),
     Confirm(ConfirmModal),
     Help,
+    Warnings(WarningsModal),
 }
 
 impl Modal {
@@ -69,6 +70,7 @@ impl Modal {
             Modal::Layouts(layouts) => layouts.handle_key(key),
             Modal::Unlock(unlock) => unlock.handle_key(key),
             Modal::Confirm(confirm) => confirm.handle_key(key),
+            Modal::Warnings(warnings) => warnings.handle_key(key),
             Modal::Help => {
                 if matches!(
                     key.code,
@@ -163,7 +165,27 @@ impl ConfirmModal {
         )
     }
 
-    pub fn reset_settings() -> Self {
+    pub fn reset_settings(keymap_only: bool) -> Self {
+        if keymap_only {
+            return Self::new(
+                "Restore compiled keymap",
+                "Restore the firmware's compiled keymap? Every keymap change saved \
+                 through Vial will be lost. Macros, tap dance, combos, key overrides \
+                 and QMK settings are not touched.",
+                vec![
+                    ConfirmChoice {
+                        key: 'y',
+                        label: "Restore keymap".into(),
+                        action: UiAction::ResetSettings,
+                    },
+                    ConfirmChoice {
+                        key: 'n',
+                        label: "Cancel".into(),
+                        action: UiAction::Close,
+                    },
+                ],
+            );
+        }
         Self::new(
             "Restore stock settings",
             "Restore the firmware's stock keymap? Every saved Studio change \
@@ -249,6 +271,63 @@ impl UnlockModal {
         match key.code {
             KeyCode::Esc => Some(UiAction::Close),
             KeyCode::Enter | KeyCode::Char('u') | KeyCode::Char('r') => Some(UiAction::CheckUnlock),
+            _ => None,
+        }
+    }
+}
+
+// --------------------------------------------------------------------------
+// Warnings
+// --------------------------------------------------------------------------
+
+pub struct WarningsModal {
+    pub warnings: Vec<String>,
+    pub scroll: u16,
+}
+
+impl WarningsModal {
+    pub fn new(warnings: Vec<String>) -> Self {
+        Self {
+            warnings,
+            scroll: 0,
+        }
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> Option<UiAction> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('W') => {
+                Some(UiAction::Close)
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.scroll = self.scroll.saturating_sub(1);
+                None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.scroll = self
+                    .scroll
+                    .saturating_add(1)
+                    .min(self.warnings.len().saturating_sub(1) as u16);
+                None
+            }
+            KeyCode::PageUp => {
+                self.scroll = self.scroll.saturating_sub(10);
+                None
+            }
+            KeyCode::PageDown => {
+                self.scroll = self
+                    .scroll
+                    .saturating_add(10)
+                    .min(self.warnings.len().saturating_sub(1) as u16);
+                None
+            }
+            KeyCode::Home => {
+                self.scroll = 0;
+                None
+            }
+            KeyCode::End => {
+                self.scroll = self.warnings.len().saturating_sub(1) as u16;
+                None
+            }
             _ => None,
         }
     }

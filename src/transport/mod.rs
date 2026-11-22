@@ -33,6 +33,12 @@ impl ConnectionKind {
             Self::VialSimulator => "Vial sim",
         }
     }
+
+    /// Vial's dynamic keymap has no Studio-style settings storage; its
+    /// "restore" action rewrites the compiled keymap only.
+    pub fn is_vial(self) -> bool {
+        matches!(self, Self::Vial | Self::VialSimulator)
+    }
 }
 
 pub enum Sink {

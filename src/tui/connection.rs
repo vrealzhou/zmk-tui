@@ -1,20 +1,30 @@
 //! Connection establishment and the snapshot of device data used by the UI.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::client::{StudioClient, StudioError};
 use crate::device::DeviceClient;
 use crate::model::{Catalog, DeviceInfo, Keymap, LockState, PhysicalLayouts};
 use crate::transport::{Connection, ConnectionKind, ble, serial};
-use crate::tui::app::{Msg, VialStart};
+use crate::tui::app::{Msg, SessionMsg, VialStart};
 use crate::vial::RawHid;
 use crate::vial::client::VialClient;
 use crate::vial::simulate::SimulatedVial;
 use crate::vial::transport::{VialDeviceInfo, list_vial_devices};
 
-#[derive(Default)]
+/// Every completed connection gets a unique id. The UI uses it to discard
+/// completions and notifications that belong to a keyboard it has left.
+static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_session_id() -> u64 {
+    NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+#[derive(Debug, Default)]
 pub struct Snapshot {
     pub keymap: Keymap,
     pub layouts: PhysicalLayouts,
@@ -24,12 +34,17 @@ pub struct Snapshot {
 }
 
 pub struct Connected {
+    pub session_id: u64,
     pub client: DeviceClient,
     pub label: String,
     pub kind: ConnectionKind,
     pub info: DeviceInfo,
     pub lock: LockState,
     pub snapshot: Option<Snapshot>,
+    /// Set when the handshake succeeded but the initial keymap read failed in a
+    /// way worth retrying. The editor opens and retries instead of dropping the
+    /// user back to the connect screen.
+    pub snapshot_error: Option<String>,
 }
 
 /// One row in the connect screen's USB/HID list. The transport is also the
@@ -180,16 +195,28 @@ pub async fn finish_connection(
 ) -> Result<Connected, String> {
     let label = connection.label.clone();
     let kind = connection.kind;
+    let session_id = next_session_id();
     let client = DeviceClient::Studio(StudioClient::start(connection));
 
     // Forward lock/unsaved/disconnect notifications to the UI. Vial has no
-    // notification channel, so there is nothing to spawn for it.
+    // notification channel, so there is nothing to spawn for it. A lagged
+    // receiver only skipped notifications; keep forwarding newer ones.
     if let Some(mut subscriptions) = client.subscribe() {
         let event_sender = events.clone();
         tokio::spawn(async move {
-            while let Ok(event) = subscriptions.recv().await {
-                if event_sender.send(Msg::DeviceEvent(event)).is_err() {
-                    break;
+            loop {
+                match subscriptions.recv().await {
+                    Ok(event) => {
+                        let message = Msg::Session {
+                            session_id,
+                            event: SessionMsg::DeviceEvent(event),
+                        };
+                        if event_sender.send(message).is_err() {
+                            break;
+                        }
+                    }
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => break,
                 }
             }
         });
@@ -205,21 +232,29 @@ pub async fn finish_connection(
         .map_err(|error| friendly(&error))?;
 
     let mut snapshot = None;
+    let mut snapshot_error = None;
     if lock == LockState::Unlocked {
         match load_snapshot(&client).await {
             Ok(loaded) => snapshot = Some(loaded),
             Err(StudioError::UnlockRequired) => lock = LockState::Locked,
-            Err(error) => return Err(friendly(&error)),
+            // A dead transport is a failed connection; a missing RPC means the
+            // firmware cannot provide a keymap at all. Everything else (usually
+            // a timeout) is worth retrying from the editor.
+            Err(error) if error.is_disconnect() => return Err(friendly(&error)),
+            Err(error @ StudioError::RpcNotFound) => return Err(friendly(&error)),
+            Err(error) => snapshot_error = Some(error.to_string()),
         }
     }
 
     Ok(Connected {
+        session_id,
         client,
         label,
         kind,
         info,
         lock,
         snapshot,
+        snapshot_error,
     })
 }
 
@@ -259,12 +294,14 @@ async fn finish_vial_connection(
         .await
         .map_err(|error| friendly(&error))?;
     Ok(Connected {
+        session_id: next_session_id(),
         client: device,
         label: format!("{} (Vial)", info.name),
         kind,
         info,
         lock: LockState::Unlocked,
         snapshot: Some(snapshot),
+        snapshot_error: None,
     })
 }
 

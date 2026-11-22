@@ -68,6 +68,44 @@ fn keycode_main(value: u32) -> String {
     keycodes::label(value)
 }
 
+/// QMK/Vial modifier masks use four left-hand bits plus one shared right-hand
+/// flag, unlike ZMK's eight independent modifier bits.
+fn qmk_modifier_symbols(mask: u32) -> String {
+    let right = mask & 0x10 != 0;
+    let mut symbols = String::new();
+    for (bit, left_symbol, right_symbol) in [
+        (0x01, "⌃", "R⌃"),
+        (0x02, "⇧", "R⇧"),
+        (0x04, "⌥", "R⌥"),
+        (0x08, "⌘", "R⌘"),
+    ] {
+        if mask & bit != 0 {
+            symbols.push_str(if right { right_symbol } else { left_symbol });
+        }
+    }
+    symbols
+}
+
+fn qmk_modifier_names(mask: u32) -> String {
+    let right = mask & 0x10 != 0;
+    let mut names = Vec::new();
+    for (bit, left_name, right_name) in [
+        (0x01, "LCTL", "RCTL"),
+        (0x02, "LSFT", "RSFT"),
+        (0x04, "LALT", "RALT"),
+        (0x08, "LGUI", "RGUI"),
+    ] {
+        if mask & bit != 0 {
+            names.push(if right { right_name } else { left_name });
+        }
+    }
+    if names.is_empty() {
+        "none".into()
+    } else {
+        names.join("+")
+    }
+}
+
 /// Render a single binding.
 pub fn binding_label(catalog: &Catalog, keymap: &Keymap, binding: Binding) -> BindingLabel {
     if binding.is_empty() {
@@ -159,6 +197,48 @@ pub fn binding_label(catalog: &Catalog, keymap: &Keymap, binding: Binding) -> Bi
             header: String::new(),
             main: "UNLOCK".into(),
             detail: "&studio_unlock".into(),
+        },
+        // Vial's pseudo behaviors carry QMK semantics: parameter 1 is a
+        // 5-bit modifier mask, not a HID usage. Rendering them through the
+        // generic path produced headers such as "MODTA" and values like "1 A".
+        "Mod-Tap (Vial)" => {
+            let mods = qmk_modifier_symbols(binding.param1);
+            BindingLabel {
+                header: format!("MT{mods}"),
+                main: keycode_main(binding.param2),
+                detail: format!(
+                    "MT({}, {})",
+                    qmk_modifier_names(binding.param1),
+                    keycodes::name(binding.param2)
+                ),
+            }
+        }
+        "Modified Key" => BindingLabel {
+            header: qmk_modifier_symbols(binding.param1),
+            main: keycode_main(binding.param2),
+            detail: format!(
+                "{}({})",
+                qmk_modifier_names(binding.param1),
+                keycodes::name(binding.param2)
+            ),
+        },
+        "Sticky Modifier" => BindingLabel {
+            header: "SK".into(),
+            main: qmk_modifier_symbols(binding.param1),
+            detail: format!("OSM({})", qmk_modifier_names(binding.param1)),
+        },
+        "To Layer" => {
+            let (position, layer_name) = layer_position(keymap, binding.param1);
+            BindingLabel {
+                header: "TO".into(),
+                main: position.clone(),
+                detail: format!("&to {position} ({layer_name})"),
+            }
+        }
+        "Vial Keycode" => BindingLabel {
+            header: "RAW".into(),
+            main: format!("0x{:04X}", binding.param1 & 0xFFFF),
+            detail: format!("QMK keycode 0x{:04X}", binding.param1 & 0xFFFF),
         },
         _ => generic_label(behavior, binding, &short),
     }
@@ -422,5 +502,49 @@ mod tests {
         );
         assert_eq!(unknown.header, "?");
         assert!(unknown.detail.contains("999"));
+    }
+
+    #[test]
+    fn vial_pseudo_behaviors_use_qmk_modifier_semantics() {
+        let catalog = crate::vial::keycode::catalog();
+        let keymap = Keymap::default();
+
+        let mod_tap = binding_label(
+            &catalog,
+            &keymap,
+            Binding {
+                behavior_id: crate::vial::keycode::behavior::MT,
+                param1: 0x02,
+                param2: 0x0007_0004,
+            },
+        );
+        assert_eq!(mod_tap.header, "MT⇧");
+        assert_eq!(mod_tap.main, "A");
+        assert!(mod_tap.detail.contains("LSFT"), "{}", mod_tap.detail);
+
+        let modified = binding_label(
+            &catalog,
+            &keymap,
+            Binding {
+                behavior_id: crate::vial::keycode::behavior::KP_MODS,
+                param1: 0x03,
+                param2: 0x0007_0005,
+            },
+        );
+        assert_eq!(modified.header, "⌃⇧");
+        assert_eq!(modified.main, "B");
+        assert!(modified.detail.contains("LCTL+LSFT"), "{}", modified.detail);
+
+        let raw = binding_label(
+            &catalog,
+            &keymap,
+            Binding {
+                behavior_id: crate::vial::keycode::behavior::RAW,
+                param1: 0x7777,
+                param2: 0,
+            },
+        );
+        assert_eq!(raw.header, "RAW");
+        assert_eq!(raw.main, "0x7777");
     }
 }

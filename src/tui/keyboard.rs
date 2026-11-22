@@ -149,12 +149,17 @@ fn colors(editor: &EditorState, binding: Binding, selected: bool) -> (Color, Col
         | Some("Toggle Layer")
         | Some("Layer-Tap")
         | Some("Mod-Tap")
+        | Some("Mod-Tap (Vial)")
+        | Some("Modified Key")
         | Some("Sticky Key")
-        | Some("Sticky Layer") => theme::KEY_HOLD_BG,
+        | Some("Sticky Layer")
+        | Some("Sticky Modifier")
+        | Some("To Layer") => theme::KEY_HOLD_BG,
         Some("Key Press") => match keycodes::by_value(binding.param1).map(|code| code.category) {
             Some(keycodes::Category::Media) => theme::KEY_MEDIA_BG,
             _ => theme::KEY_BG,
         },
+        Some("Vial Keycode") => theme::KEY_UNKNOWN_BG,
         Some(_) => theme::KEY_BG,
         None if binding.is_empty() => theme::KEY_NONE_BG,
         None => theme::KEY_UNKNOWN_BG,
