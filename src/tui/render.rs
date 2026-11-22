@@ -102,9 +102,9 @@ fn render_editor(frame: &mut Frame, area: Rect, app: &mut App, hits: &mut MouseM
         busy.as_deref(),
         *tick,
         if editor.locked {
-            "u unlock · ↑↓←→ move · Tab layer · L layers · ? help"
+            "u unlock · ↑↓←→ move · Tab layer · L layers · b devices · ? help"
         } else {
-            "↑↓←→ move · Enter edit · Tab layer · L layers · ? help"
+            "↑↓←→ move · Enter edit · Tab layer · L layers · b devices · ? help"
         },
         hits,
     );
@@ -531,7 +531,7 @@ fn render_usb_panel(
     let count = connect.usb.len();
     let title = Line::from(vec![
         Span::styled(
-            " USB ",
+            " USB / HID ",
             Style::default()
                 .fg(theme::ACCENT)
                 .add_modifier(Modifier::BOLD),
@@ -550,11 +550,15 @@ fn render_usb_panel(
         frame.render_widget(
             Paragraph::new(vec![
                 Line::from(Span::styled(
-                    "No USB serial devices",
+                    "No USB keyboards found",
                     Style::default().fg(theme::TEXT),
                 )),
                 Line::from(Span::styled(
-                    "Connect the keyboard with a data cable.",
+                    "Studio uses a serial port; Vial uses raw HID.",
+                    theme::dim(),
+                )),
+                Line::from(Span::styled(
+                    "A 2.4G receiver may not expose the Vial raw-HID endpoint.",
                     theme::dim(),
                 )),
             ])
@@ -676,10 +680,11 @@ fn render_bluetooth_panel(
                 } else {
                     "  advertising"
                 };
+                let name = format!("{} (ZMK Studio)", device.name);
                 let budget = (parts[0].width as usize).saturating_sub(4 + text::width(status));
                 ListItem::new(Line::from(vec![
                     Span::styled(
-                        text::ellipsize(&device.name, budget),
+                        text::ellipsize(&name, budget),
                         Style::default().fg(theme::TEXT),
                     ),
                     Span::styled(status, theme::dim()),
@@ -1567,6 +1572,7 @@ fn render_help(frame: &mut Frame, area: Rect, hits: &mut MouseMap) {
         Line::from("  s                        save changes to the keyboard"),
         Line::from("  d                        discard unsaved changes"),
         Line::from("  R                        restore stock firmware keymap/settings"),
+        Line::from("  b                        back to the device list"),
         Line::from("  q / Ctrl-C               quit"),
         Line::from(Span::styled("Notes", theme::title())),
         Line::from("  Edits apply live; only “save” persists them."),

@@ -36,6 +36,49 @@ For architecture, protocol, testing and contribution details, see the
 | --- | --- |
 | ![Behavior picker](docs/screenshots/binding-behavior.png) | ![Keycode picker](docs/screenshots/binding-param.png) |
 
+## Vial keyboards (experimental)
+
+The same editor can also edit keymaps on [Vial](https://get.vial.today)
+keyboards over USB raw HID. Start the in-process demo without hardware:
+
+```bash
+cargo run -- --simulate-vial
+```
+
+Real keyboards are detected automatically: ZMK Studio keyboards appear as
+`… (ZMK Studio)` serial ports and Vial keyboards as `… (Vial)` raw-HID
+interfaces. By default the connect screen stays up while USB/HID and Bluetooth
+are scanned, and you choose the keyboard and standard yourself. `--auto`
+connects immediately when exactly one candidate is visible. A keyboard that
+exposes both interfaces appears twice, so both standards are available from the
+same screen. `--vial` remains as a shortcut that opens the first Vial interface
+directly.
+
+```bash
+cargo run -- --vial
+cargo run -- --auto     # optional: connect the only visible keyboard immediately
+```
+
+Vial's configuration endpoint is USB raw HID. A 2.4G receiver only works if it
+tunnels that endpoint to the keyboard; if `--hid` shows no interface with usage
+page `0xFF60` / usage `0x61`, the receiver does not expose Vial configuration
+and the keyboard must be connected by cable.
+
+Vial support is intentionally keycode-only: bindings, layers (fixed count) and
+save/discard/reset work through the same UI. Macros, tap dance, combos, key
+overrides, QMK settings, encoders and physical-layout switching are not edited;
+keycodes this editor cannot express are shown as raw `0xNNNN` values and are
+preserved exactly. Edits are staged and only written on save, with read-back
+verification. See the [Vial integration notes](docs/vial-integration-feasibility.md)
+for protocol details, limitations and the hardware test checklist.
+
+`--list` for Vial devices (read-only) is available through the probe:
+
+```bash
+cargo run --example vial_probe -- --list
+cargo run --example vial_probe -- --real
+```
+
 ## Supported keyboards
 
 Any keyboard whose firmware exposes ZMK Studio works. The editor reads the
@@ -145,6 +188,7 @@ connected to another host will not appear in the Bluetooth list.
 | `s` | Save changes to the keyboard |
 | `d` | Discard unsaved changes (confirm) |
 | `R` | Restore stock firmware settings (confirm) |
+| `b` | Back to the device list (prompts if unsaved) |
 | `?` | Help |
 | `q` / `Ctrl-C` | Quit (prompts if unsaved) |
 
@@ -216,10 +260,14 @@ reserved-layer setup.
   space or reduce the number of saved settings.
 - **“RPC not found”** — the firmware is too old or does not have Studio enabled;
   rebuild with `CONFIG_ZMK_STUDIO=y`.
+- **Vial keyboard not found over a 2.4G receiver** — run
+  `cargo run --example vial_probe -- --hid` and look for usage page `0xFF60` /
+  usage `0x61`. If it is absent, the receiver only exposes a normal keyboard
+  endpoint; connect the keyboard by USB cable.
 
 ## Known limitations
 
-- Rotated keys are rendered unrotated; navigation still uses the rendered grid.
+- Rotated keys are rendered unrotated; KLE rotation clusters (`r`/`rx`/`ry`) use their rotated centre x on their original row, and navigation follows the rendered grid.
 - Rotary encoder bindings are not exposed by the current Studio protocol.
   Sofle's two encoder push-buttons are ordinary editable key positions.
 - Pointing-device configuration (trackball sensor, DPI, scrolling,

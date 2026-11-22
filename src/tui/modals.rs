@@ -39,6 +39,9 @@ pub enum UiAction {
     QuitSave,
     QuitDiscard,
     QuitAnyway,
+    DevicesSave,
+    DevicesDiscard,
+    DevicesAnyway,
     CheckUnlock,
     /// Informational message that keeps the current modal open.
     Notice(String),
@@ -130,6 +133,31 @@ impl ConfirmModal {
                     key: 'q',
                     label: "Quit anyway".into(),
                     action: UiAction::QuitAnyway,
+                },
+            ],
+        )
+    }
+
+    pub fn devices() -> Self {
+        Self::new(
+            "Leave this keyboard",
+            "Return to the device list? This keymap has edits that have not been \
+             saved to the keyboard.",
+            vec![
+                ConfirmChoice {
+                    key: 's',
+                    label: "Save & choose device".into(),
+                    action: UiAction::DevicesSave,
+                },
+                ConfirmChoice {
+                    key: 'd',
+                    label: "Discard & choose device".into(),
+                    action: UiAction::DevicesDiscard,
+                },
+                ConfirmChoice {
+                    key: 'b',
+                    label: "Back without saving".into(),
+                    action: UiAction::DevicesAnyway,
                 },
             ],
         )

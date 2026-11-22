@@ -5,9 +5,14 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::client::{StudioClient, StudioError};
+use crate::device::DeviceClient;
 use crate::model::{Catalog, DeviceInfo, Keymap, LockState, PhysicalLayouts};
 use crate::transport::{Connection, ConnectionKind, ble, serial};
-use crate::tui::app::Msg;
+use crate::tui::app::{Msg, VialStart};
+use crate::vial::RawHid;
+use crate::vial::client::VialClient;
+use crate::vial::simulate::SimulatedVial;
+use crate::vial::transport::{VialDeviceInfo, list_vial_devices};
 
 #[derive(Default)]
 pub struct Snapshot {
@@ -19,7 +24,7 @@ pub struct Snapshot {
 }
 
 pub struct Connected {
-    pub client: StudioClient,
+    pub client: DeviceClient,
     pub label: String,
     pub kind: ConnectionKind,
     pub info: DeviceInfo,
@@ -27,16 +32,81 @@ pub struct Connected {
     pub snapshot: Option<Snapshot>,
 }
 
+/// One row in the connect screen's USB/HID list. The transport is also the
+/// standard: a CDC-ACM serial port is a ZMK Studio candidate, a raw-HID
+/// interface with Vial's serial magic is a Vial keyboard.
+#[derive(Clone, Debug)]
+pub enum UsbEntry {
+    Studio(serial::UsbDevice),
+    Vial(VialDeviceInfo),
+}
+
+impl UsbEntry {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Studio(device) => match device.product.as_deref() {
+                Some(product) if !product.is_empty() => {
+                    format!("{product} (ZMK Studio)  {}", device.path)
+                }
+                _ => format!("{} (ZMK Studio)", device.path),
+            },
+            Self::Vial(device) => device.label(),
+        }
+    }
+
+    pub fn standard(&self) -> &'static str {
+        match self {
+            Self::Studio(_) => "ZMK Studio",
+            Self::Vial(_) => "Vial",
+        }
+    }
+
+    /// The backend choice for this row. A keyboard that exposes both a Studio
+    /// CDC port and a Vial raw-HID interface appears as two rows; selecting
+    /// either switches to that standard without restarting.
+    pub fn choice(&self) -> DeviceChoice {
+        match self {
+            Self::Studio(device) => DeviceChoice::Usb {
+                path: device.path.clone(),
+                label: self.label(),
+            },
+            Self::Vial(device) => DeviceChoice::Vial {
+                path: device.path.clone(),
+                label: device.label(),
+            },
+        }
+    }
+}
+
+/// Every USB/HID keyboard visible right now, already classified by interface.
+pub fn list_usb_entries() -> Vec<UsbEntry> {
+    let mut entries: Vec<UsbEntry> = serial::list_usb_devices()
+        .into_iter()
+        .map(UsbEntry::Studio)
+        .collect();
+    entries.extend(list_vial_devices().into_iter().map(UsbEntry::Vial));
+    entries
+}
+
 pub enum DeviceChoice {
     Usb { path: String, label: String },
+    Vial { path: String, label: String },
     Bluetooth { device: ble::BleDevice },
 }
 
 impl DeviceChoice {
     pub fn label(&self) -> String {
         match self {
-            Self::Usb { label, .. } => label.clone(),
+            Self::Usb { label, .. } | Self::Vial { label, .. } => label.clone(),
             Self::Bluetooth { device } => device.name.clone(),
+        }
+    }
+
+    pub fn standard(&self) -> &'static str {
+        match self {
+            Self::Usb { .. } => "ZMK Studio",
+            Self::Vial { .. } => "Vial",
+            Self::Bluetooth { .. } => "ZMK Studio",
         }
     }
 }
@@ -62,6 +132,11 @@ pub async fn connect_choice(
         DeviceChoice::Bluetooth { device } => ble::connect(device)
             .await
             .map_err(|error| format!("{error:#}"))?,
+        DeviceChoice::Vial { path, .. } => {
+            let transport =
+                crate::vial::transport::open_path(&path).map_err(|error| error.to_string())?;
+            return finish_vial_connection(Box::new(transport), ConnectionKind::Vial).await;
+        }
     };
     finish_connection(connection, events).await
 }
@@ -105,18 +180,20 @@ pub async fn finish_connection(
 ) -> Result<Connected, String> {
     let label = connection.label.clone();
     let kind = connection.kind;
-    let client = StudioClient::start(connection);
+    let client = DeviceClient::Studio(StudioClient::start(connection));
 
-    // Forward lock/unsaved/disconnect notifications to the UI.
-    let mut subscriptions = client.subscribe();
-    let event_sender = events.clone();
-    tokio::spawn(async move {
-        while let Ok(event) = subscriptions.recv().await {
-            if event_sender.send(Msg::DeviceEvent(event)).is_err() {
-                break;
+    // Forward lock/unsaved/disconnect notifications to the UI. Vial has no
+    // notification channel, so there is nothing to spawn for it.
+    if let Some(mut subscriptions) = client.subscribe() {
+        let event_sender = events.clone();
+        tokio::spawn(async move {
+            while let Ok(event) = subscriptions.recv().await {
+                if event_sender.send(Msg::DeviceEvent(event)).is_err() {
+                    break;
+                }
             }
-        }
-    });
+        });
+    }
 
     let info = client
         .get_device_info()
@@ -146,7 +223,52 @@ pub async fn finish_connection(
     })
 }
 
-pub async fn load_snapshot(client: &StudioClient) -> Result<Snapshot, StudioError> {
+/// Connect to a Vial keyboard, either the in-process demo or the first USB
+/// raw-HID interface. The handshake and keymap read happen before the UI
+/// switches to the editor, so protocol errors are shown on the connect screen.
+pub async fn connect_vial(start: VialStart) -> Result<Connected, String> {
+    match start {
+        VialStart::Simulate => {
+            finish_vial_connection(
+                Box::new(SimulatedVial::demo()),
+                ConnectionKind::VialSimulator,
+            )
+            .await
+        }
+        VialStart::Usb => {
+            let transport =
+                crate::vial::transport::VialHid::open_first().map_err(|error| error.to_string())?;
+            finish_vial_connection(Box::new(transport), ConnectionKind::Vial).await
+        }
+    }
+}
+
+async fn finish_vial_connection(
+    transport: Box<dyn RawHid>,
+    kind: ConnectionKind,
+) -> Result<Connected, String> {
+    let client = VialClient::open(transport)
+        .await
+        .map_err(|error| friendly(&error))?;
+    let device = DeviceClient::Vial(client);
+    let info = device
+        .get_device_info()
+        .await
+        .map_err(|error| friendly(&error))?;
+    let snapshot = load_snapshot(&device)
+        .await
+        .map_err(|error| friendly(&error))?;
+    Ok(Connected {
+        client: device,
+        label: format!("{} (Vial)", info.name),
+        kind,
+        info,
+        lock: LockState::Unlocked,
+        snapshot: Some(snapshot),
+    })
+}
+
+pub async fn load_snapshot(client: &DeviceClient) -> Result<Snapshot, StudioError> {
     let keymap = client.get_keymap().await?;
     // Older/limited firmware may not implement physical layouts. Keep editing
     // available with the generic fallback grid instead of failing the whole

@@ -3,6 +3,7 @@ use std::time::Duration;
 use clap::Parser;
 use zmk_tui::simulator::SimulatedBoard;
 use zmk_tui::tui::StartOptions;
+use zmk_tui::tui::app::VialStart;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -35,6 +36,18 @@ struct Cli {
         default_missing_value = "corne"
     )]
     simulate: Option<SimulatedBoard>,
+
+    /// Edit the simulated Vial keyboard instead of a ZMK Studio device
+    #[arg(long, conflicts_with_all = ["port", "ble", "simulate", "vial"])]
+    simulate_vial: bool,
+
+    /// Edit the first Vial keyboard over USB raw HID
+    #[arg(long, conflicts_with_all = ["port", "ble", "simulate", "simulate_vial"])]
+    vial: bool,
+
+    /// Connect automatically when exactly one keyboard is visible
+    #[arg(long)]
+    auto: bool,
 }
 
 #[tokio::main]
@@ -46,10 +59,21 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let vial = if cli.simulate_vial {
+        Some(VialStart::Simulate)
+    } else if cli.vial {
+        Some(VialStart::Usb)
+    } else {
+        None
+    };
+
     zmk_tui::tui::run(StartOptions {
         port: cli.port,
         ble: cli.ble,
         simulate: cli.simulate,
+        vial,
+        scan_vial: true,
+        auto_connect: cli.auto,
     })
     .await
 }
@@ -68,6 +92,40 @@ async fn list_devices() -> anyhow::Result<()> {
         if let Some(serial) = &device.serial_number {
             println!("      serial: {serial}");
         }
+    }
+
+    println!();
+    println!("Raw HID interfaces on usage page 0xFF60 / usage 0x61:");
+    match zmk_tui::vial::transport::list() {
+        Ok(devices) if devices.is_empty() => println!("  (none)"),
+        Ok(devices) => {
+            for device in devices {
+                println!(
+                    "  {:04X}:{:04X} {} vial_serial={} serial={:?} path={}",
+                    device.vendor_id,
+                    device.product_id,
+                    device.product,
+                    device.is_vial,
+                    device.serial,
+                    device.path
+                );
+            }
+        }
+        Err(error) => println!("  HID enumeration failed: {error}"),
+    }
+
+    println!();
+    println!("Detected Vial keyboards:");
+    let vial = zmk_tui::vial::transport::list_vial_devices();
+    if vial.is_empty() {
+        println!("  (none)");
+        println!("  If this is a 2.4G receiver, try a wired USB connection.");
+    }
+    for device in vial {
+        println!(
+            "  {:04X}:{:04X} {}  serial={:?} path={}",
+            device.vendor_id, device.product_id, device.name, device.serial, device.path
+        );
     }
 
     println!();
@@ -123,5 +181,13 @@ mod tests {
     fn no_simulate_flag_is_none() {
         let cli = Cli::try_parse_from(["zmk-tui"]).expect("parse");
         assert_eq!(cli.simulate, None);
+    }
+
+    #[test]
+    fn auto_connect_is_opt_in() {
+        let cli = Cli::try_parse_from(["zmk-tui"]).expect("parse");
+        assert!(!cli.auto);
+        let cli = Cli::try_parse_from(["zmk-tui", "--auto"]).expect("parse");
+        assert!(cli.auto);
     }
 }

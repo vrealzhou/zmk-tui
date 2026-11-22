@@ -8,7 +8,8 @@ use crossterm::event::{
 use ratatui::widgets::ListState;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::client::{StudioClient, StudioError, StudioEvent};
+use crate::client::{StudioError, StudioEvent};
+use crate::device::{Capabilities, DeviceClient};
 use crate::layout::{self, Direction};
 use crate::model::{
     Binding, Catalog, DeviceInfo, KeyGeometry, Keymap, LockState, PhysicalLayout, PhysicalLayouts,
@@ -16,8 +17,8 @@ use crate::model::{
 use crate::simulator::{SimulatedBoard, Simulator};
 use crate::transport::{ConnectionKind, ble, serial};
 use crate::tui::connection::{
-    Connected, DeviceChoice, Snapshot, connect_by_bluetooth_name, connect_choice,
-    finish_connection, load_snapshot, scan_bluetooth,
+    Connected, DeviceChoice, Snapshot, UsbEntry, connect_by_bluetooth_name, connect_choice,
+    finish_connection, list_usb_entries, load_snapshot, scan_bluetooth,
 };
 use crate::tui::modals::{
     BindingWizard, ConfirmModal, LayerModal, LayoutModal, Modal, UiAction, UnlockModal,
@@ -29,11 +30,36 @@ const SNAPSHOT_RETRY_DELAY: Duration = Duration::from_secs(1);
 /// How many times a failed keymap read is retried before giving up.
 const MAX_SNAPSHOT_RETRIES: u32 = 5;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VialStart {
+    /// In-process Vial demo keyboard.
+    Simulate,
+    /// First USB raw-HID Vial interface.
+    Usb,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct StartOptions {
     pub port: Option<String>,
     pub ble: Option<String>,
     pub simulate: Option<SimulatedBoard>,
+    pub vial: Option<VialStart>,
+    /// Whether the connect screen also enumerates Vial raw-HID interfaces.
+    /// The binary enables this; library tests keep it off so they never probe
+    /// host hardware.
+    pub scan_vial: bool,
+    /// Opt-in (`--auto`): connect immediately when exactly one keyboard is
+    /// visible. The default stays on the device list so the user can wait for
+    /// a Bluetooth scan and choose between USB/HID and Bluetooth devices.
+    pub auto_connect: bool,
+}
+
+/// What to do after a save/discard completes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AfterSave {
+    Stay,
+    Quit,
+    Devices,
 }
 
 pub enum Msg {
@@ -42,7 +68,7 @@ pub enum Msg {
     Tick,
     /// The terminal input thread stopped (stdin closed or a read error).
     InputClosed,
-    UsbDevices(Vec<serial::UsbDevice>),
+    UsbDevices(Vec<UsbEntry>),
     BluetoothDevices(Result<Vec<ble::BleDevice>, String>),
     ConnectResult(Result<Connected, String>),
     DeviceEvent(StudioEvent),
@@ -55,11 +81,11 @@ pub enum Msg {
     },
     Saved {
         result: Result<(), StudioError>,
-        then_quit: bool,
+        then: AfterSave,
     },
     Discarded {
         result: Result<(), StudioError>,
-        then_quit: bool,
+        then: AfterSave,
     },
     KeymapRefreshed(Result<Keymap, StudioError>),
     /// A keymap and physical-layout refresh, used after a discard because the
@@ -94,7 +120,7 @@ pub enum Panel {
 }
 
 pub struct ConnectState {
-    pub usb: Vec<serial::UsbDevice>,
+    pub usb: Vec<UsbEntry>,
     pub bluetooth: Vec<ble::BleDevice>,
     pub focus: Panel,
     pub usb_state: ListState,
@@ -118,7 +144,8 @@ impl Default for ConnectState {
 }
 
 pub struct EditorState {
-    pub client: StudioClient,
+    pub client: DeviceClient,
+    pub capabilities: Capabilities,
     pub label: String,
     pub kind: ConnectionKind,
     pub info: DeviceInfo,
@@ -137,8 +164,10 @@ impl EditorState {
         let has_snapshot = connected.snapshot.is_some();
         let snapshot = connected.snapshot.unwrap_or_default();
         let locked = connected.lock.is_locked();
+        let capabilities = connected.client.capabilities();
         let mut editor = Self {
             client: connected.client,
+            capabilities,
             label: connected.label,
             kind: connected.kind,
             info: connected.info,
@@ -261,6 +290,7 @@ pub struct App {
     pub keyboard_viewport: layout::Viewport,
     last_click: Option<(MouseTarget, Instant)>,
     pub start: StartOptions,
+    auto_connect: bool,
     simulator: Option<Simulator>,
     connect_inflight: bool,
     scanning_inflight: bool,
@@ -290,6 +320,7 @@ impl App {
             mouse: MouseMap::default(),
             keyboard_viewport: layout::Viewport::default(),
             last_click: None,
+            auto_connect: start.auto_connect,
             start,
             simulator: None,
             connect_inflight: false,
@@ -315,6 +346,16 @@ impl App {
     }
 
     pub fn on_start(&mut self) {
+        if let Some(vial) = self.start.vial {
+            self.connect_inflight = true;
+            self.busy = Some("Connecting to Vial keyboard…".into());
+            let tx = self.tx.clone();
+            tokio::spawn(async move {
+                let result = crate::tui::connection::connect_vial(vial).await;
+                let _ = tx.send(Msg::ConnectResult(result));
+            });
+            return;
+        }
         if let Some(board) = self.start.simulate {
             self.start_simulator(board);
             return;
@@ -331,6 +372,9 @@ impl App {
             return;
         }
         self.refresh_usb();
+        if self.try_auto_connect() {
+            return;
+        }
         self.spawn_bluetooth_scan();
     }
 
@@ -374,6 +418,7 @@ impl App {
                         self.connect.bluetooth = devices;
                         self.connect.scan_error = None;
                         self.clamp_connect_selection();
+                        self.try_auto_connect();
                     }
                     Err(error) => {
                         self.connect.bluetooth.clear();
@@ -402,8 +447,8 @@ impl App {
                 position,
                 binding,
             } => self.finish_binding_set(result, layer_id, position, binding),
-            Msg::Saved { result, then_quit } => self.finish_saved(result, then_quit),
-            Msg::Discarded { result, then_quit } => self.finish_discarded(result, then_quit),
+            Msg::Saved { result, then } => self.finish_saved(result, then),
+            Msg::Discarded { result, then } => self.finish_discarded(result, then),
             Msg::KeymapRefreshed(result) => self.finish_keymap_refresh(result),
             Msg::EditRefreshed(result) => self.finish_edit_refresh(result),
             _ => unreachable!("only edit messages reach this handler"),
@@ -438,7 +483,7 @@ impl App {
         self.toast("Binding updated — press s to save", StatusKind::Success);
     }
 
-    fn finish_saved(&mut self, result: Result<(), StudioError>, then_quit: bool) {
+    fn finish_saved(&mut self, result: Result<(), StudioError>, then: AfterSave) {
         if let Err(error) = result {
             self.handle_studio_error(error);
             return;
@@ -447,13 +492,20 @@ impl App {
             editor.dirty = false;
         }
         self.busy = None;
-        self.toast("Saved to keyboard", StatusKind::Success);
-        if then_quit {
-            self.should_quit = true;
+        match then {
+            AfterSave::Stay => self.toast("Saved to keyboard", StatusKind::Success),
+            AfterSave::Quit => {
+                self.toast("Saved to keyboard", StatusKind::Success);
+                self.should_quit = true;
+            }
+            AfterSave::Devices => {
+                self.leave_editor();
+                self.toast("Saved — choose a keyboard", StatusKind::Success);
+            }
         }
     }
 
-    fn finish_discarded(&mut self, result: Result<(), StudioError>, then_quit: bool) {
+    fn finish_discarded(&mut self, result: Result<(), StudioError>, then: AfterSave) {
         if let Err(error) = result {
             self.handle_studio_error(error);
             return;
@@ -462,11 +514,19 @@ impl App {
             editor.dirty = false;
         }
         self.busy = None;
-        self.toast("Discarded unsaved changes", StatusKind::Info);
-        if then_quit {
-            self.should_quit = true;
-        } else {
-            self.spawn_refresh_edit();
+        match then {
+            AfterSave::Stay => {
+                self.toast("Discarded unsaved changes", StatusKind::Info);
+                self.spawn_refresh_edit();
+            }
+            AfterSave::Quit => {
+                self.toast("Discarded unsaved changes", StatusKind::Info);
+                self.should_quit = true;
+            }
+            AfterSave::Devices => {
+                self.leave_editor();
+                self.toast("Discarded — choose a keyboard", StatusKind::Info);
+            }
         }
     }
 
@@ -738,10 +798,11 @@ impl App {
         match key.code {
             KeyCode::Enter => self.open_binding_editor(),
             KeyCode::Char('L') => self.open_layer_manager(),
+            KeyCode::Char('b') => self.request_back_to_devices(),
             KeyCode::Char('p') => self.open_layout_picker(),
             KeyCode::Char('s') => {
                 if self.require_unlocked() {
-                    self.spawn_save(false);
+                    self.spawn_save(AfterSave::Stay);
                 }
             }
             KeyCode::Char('d') => {
@@ -884,7 +945,7 @@ impl App {
             MouseTarget::BindingApply => self.press_modal_key(KeyCode::Enter),
             MouseTarget::EditorSave => {
                 if self.require_unlocked() {
-                    self.spawn_save(false);
+                    self.spawn_save(AfterSave::Stay);
                 }
             }
             MouseTarget::EditorDiscard => {
@@ -975,6 +1036,9 @@ impl App {
             | UiAction::QuitSave
             | UiAction::QuitDiscard
             | UiAction::QuitAnyway
+            | UiAction::DevicesSave
+            | UiAction::DevicesDiscard
+            | UiAction::DevicesAnyway
             | UiAction::Close
             | UiAction::CheckUnlock) => self.apply_session_action(action),
         }
@@ -1055,6 +1119,9 @@ impl App {
             | UiAction::QuitSave
             | UiAction::QuitDiscard
             | UiAction::QuitAnyway
+            | UiAction::DevicesSave
+            | UiAction::DevicesDiscard
+            | UiAction::DevicesAnyway
             | UiAction::Close
             | UiAction::CheckUnlock) => self.apply_quit_action(action),
             _ => unreachable!("only session actions reach this handler"),
@@ -1066,13 +1133,13 @@ impl App {
             UiAction::Save => {
                 if self.require_unlocked() {
                     self.modal = None;
-                    self.spawn_save(false);
+                    self.spawn_save(AfterSave::Stay);
                 }
             }
             UiAction::Discard => {
                 if self.require_unlocked() {
                     self.modal = None;
-                    self.spawn_discard(false);
+                    self.spawn_discard(AfterSave::Stay);
                 }
             }
             UiAction::ResetSettings => {
@@ -1091,16 +1158,33 @@ impl App {
             UiAction::QuitSave => {
                 if self.require_unlocked() {
                     self.modal = None;
-                    self.spawn_save(true);
+                    self.spawn_save(AfterSave::Quit);
                 }
             }
             UiAction::QuitDiscard => {
                 if self.require_unlocked() {
                     self.modal = None;
-                    self.spawn_discard(true);
+                    self.spawn_discard(AfterSave::Quit);
                 }
             }
             UiAction::QuitAnyway => self.should_quit = true,
+            UiAction::DevicesSave => {
+                if self.require_unlocked() {
+                    self.modal = None;
+                    self.spawn_save(AfterSave::Devices);
+                }
+            }
+            UiAction::DevicesDiscard => {
+                if self.require_unlocked() {
+                    self.modal = None;
+                    self.spawn_discard(AfterSave::Devices);
+                }
+            }
+            UiAction::DevicesAnyway => {
+                self.modal = None;
+                self.leave_editor();
+                self.toast("Choose a keyboard", StatusKind::Info);
+            }
             UiAction::Close => self.modal = None,
             UiAction::CheckUnlock => {
                 if let Some(Modal::Unlock(unlock)) = &mut self.modal {
@@ -1188,6 +1272,13 @@ impl App {
         let Some(editor) = &self.editor else {
             return;
         };
+        if !editor.capabilities.manage_layers {
+            self.toast(
+                "This Vial keyboard has a fixed layer count; only bindings can be edited",
+                StatusKind::Warning,
+            );
+            return;
+        }
         if editor.keymap.layers.is_empty() {
             self.toast("No layers loaded yet", StatusKind::Warning);
             return;
@@ -1234,6 +1325,35 @@ impl App {
         true
     }
 
+    fn request_back_to_devices(&mut self) {
+        if self.editor.as_ref().is_some_and(|editor| editor.dirty) {
+            self.modal = Some(Modal::Confirm(ConfirmModal::devices()));
+            return;
+        }
+        self.leave_editor();
+        self.toast("Choose a keyboard", StatusKind::Info);
+    }
+
+    /// Drop the current device connection and return to a fresh device list.
+    /// Dropping the client closes the serial port, BLE link or raw-HID handle;
+    /// the next screen scans again instead of reusing stale state.
+    fn leave_editor(&mut self) {
+        self.auto_connect = false;
+        self.editor = None;
+        self.modal = None;
+        self.busy = None;
+        self.connect_inflight = false;
+        self.scanning_inflight = false;
+        self.snapshot_retry_at = None;
+        self.snapshot_attempts = 0;
+        self.pending_layer_select = None;
+        self.last_click = None;
+        self.simulator = None;
+        self.connect = ConnectState::default();
+        self.refresh_usb();
+        self.spawn_bluetooth_scan();
+    }
+
     fn request_quit(&mut self) {
         if let Some(editor) = &self.editor {
             if editor.dirty {
@@ -1249,7 +1369,14 @@ impl App {
     // ------------------------------------------------------------------
 
     fn refresh_usb(&mut self) {
-        self.connect.usb = serial::list_usb_devices();
+        self.connect.usb = if self.start.scan_vial {
+            list_usb_entries()
+        } else {
+            serial::list_usb_devices()
+                .into_iter()
+                .map(UsbEntry::Studio)
+                .collect()
+        };
         self.clamp_connect_selection();
     }
 
@@ -1264,15 +1391,54 @@ impl App {
         }
     }
 
+    /// The single keyboard the app may connect to without asking, if any.
+    /// More than one USB/HID candidate is genuinely ambiguous, so the connect
+    /// screen stays up and the user picks.
+    pub fn auto_connect_choice(&self) -> Option<DeviceChoice> {
+        if self.connect.usb.len() == 1 {
+            return Some(self.connect.usb[0].choice());
+        }
+        if !self.connect.usb.is_empty() {
+            return None;
+        }
+        if self.connect.bluetooth.len() == 1 {
+            return Some(DeviceChoice::Bluetooth {
+                device: self.connect.bluetooth[0].clone(),
+            });
+        }
+        let mut connected = self
+            .connect
+            .bluetooth
+            .iter()
+            .filter(|device| device.connected);
+        match (connected.next(), connected.next()) {
+            (Some(device), None) => Some(DeviceChoice::Bluetooth {
+                device: device.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    fn try_auto_connect(&mut self) -> bool {
+        if !self.auto_connect || self.connect_inflight || self.editor.is_some() {
+            return false;
+        }
+        let Some(choice) = self.auto_connect_choice() else {
+            return false;
+        };
+        // One attempt only: a failed automatic connection drops to the connect
+        // list instead of retrying forever in the background.
+        self.auto_connect = false;
+        self.spawn_connect(choice);
+        true
+    }
+
     fn connect_selected(&mut self) {
         let choice = match self.connect.focus {
             Panel::Usb => {
                 let index = self.connect.usb_state.selected().unwrap_or(0);
                 match self.connect.usb.get(index) {
-                    Some(device) => Some(DeviceChoice::Usb {
-                        path: device.path.clone(),
-                        label: device.label(),
-                    }),
+                    Some(entry) => Some(entry.choice()),
                     None => {
                         self.toast("Select a USB keyboard first", StatusKind::Warning);
                         None
@@ -1301,8 +1467,13 @@ impl App {
         if self.connect_inflight {
             return;
         }
+        self.auto_connect = false;
         self.connect_inflight = true;
-        self.busy = Some(format!("Connecting to {}…", choice.label()));
+        self.busy = Some(format!(
+            "Connecting to {} · {}…",
+            choice.label(),
+            choice.standard()
+        ));
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let result = connect_choice(choice, tx.clone()).await;
@@ -1401,10 +1572,7 @@ impl App {
                 self.last_lock_poll = Instant::now();
                 if !warnings.is_empty() {
                     self.toast(
-                        format!(
-                            "Connected to {name}; {} behavior(s) could not be read",
-                            warnings.len()
-                        ),
+                        format!("Connected to {name}; {} warning(s)", warnings.len()),
                         StatusKind::Warning,
                     );
                 } else if locked {
@@ -1653,10 +1821,7 @@ impl App {
                     );
                 } else {
                     self.toast(
-                        format!(
-                            "Keymap loaded; {} behavior(s) could not be read",
-                            warnings.len()
-                        ),
+                        format!("Keymap loaded; {} warning(s)", warnings.len()),
                         StatusKind::Warning,
                     );
                 }
@@ -1699,23 +1864,23 @@ impl App {
         });
     }
 
-    fn spawn_save(&mut self, then_quit: bool) {
+    fn spawn_save(&mut self, then: AfterSave) {
         let Some(client) = self.client() else {
             return;
         };
-        self.busy = Some(if then_quit {
-            "Saving before quitting…".into()
-        } else {
-            "Saving…".into()
+        self.busy = Some(match then {
+            AfterSave::Quit => "Saving before quitting…".into(),
+            AfterSave::Devices => "Saving before returning…".into(),
+            AfterSave::Stay => "Saving…".into(),
         });
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let result = client.save_changes().await;
-            let _ = tx.send(Msg::Saved { result, then_quit });
+            let _ = tx.send(Msg::Saved { result, then });
         });
     }
 
-    fn spawn_discard(&mut self, then_quit: bool) {
+    fn spawn_discard(&mut self, then: AfterSave) {
         let Some(client) = self.client() else {
             return;
         };
@@ -1723,7 +1888,7 @@ impl App {
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let result = client.discard_changes().await;
-            let _ = tx.send(Msg::Discarded { result, then_quit });
+            let _ = tx.send(Msg::Discarded { result, then });
         });
     }
 
@@ -1877,7 +2042,7 @@ impl App {
         }
     }
 
-    fn client(&self) -> Option<StudioClient> {
+    fn client(&self) -> Option<DeviceClient> {
         self.editor.as_ref().map(|editor| editor.client.clone())
     }
 
@@ -1907,4 +2072,46 @@ fn move_list(state: &mut ListState, len: usize, delta: isize) {
     let current = state.selected().unwrap_or(0).min(len - 1) as isize;
     let next = (current + delta).clamp(0, len as isize - 1) as usize;
     state.select(Some(next));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::serial::UsbDevice;
+
+    #[test]
+    fn auto_connect_is_off_by_default() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(tx, StartOptions::default());
+        app.connect.usb = vec![UsbEntry::Studio(UsbDevice {
+            path: "/dev/zmk-tui-test".into(),
+            product: Some("Test".into()),
+            manufacturer: None,
+            serial_number: None,
+        })];
+        assert!(!app.try_auto_connect());
+        assert!(app.editor.is_none());
+    }
+
+    #[tokio::test]
+    async fn auto_connect_dispatches_the_only_candidate() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            tx,
+            StartOptions {
+                auto_connect: true,
+                scan_vial: false,
+                ..Default::default()
+            },
+        );
+        app.connect.usb = vec![UsbEntry::Studio(UsbDevice {
+            path: "/dev/zmk-tui-test".into(),
+            product: Some("Test".into()),
+            manufacturer: None,
+            serial_number: None,
+        })];
+        assert!(app.try_auto_connect());
+        assert!(app.connect_inflight);
+        assert!(!app.auto_connect, "automatic connection is one-shot");
+    }
 }

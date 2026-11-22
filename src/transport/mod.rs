@@ -17,6 +17,10 @@ pub enum ConnectionKind {
     Bluetooth,
     /// In-process channel, used by tests and the built-in simulator.
     Channel,
+    /// Vial keyboard over USB raw HID.
+    Vial,
+    /// In-process Vial keyboard used by `--simulate-vial`.
+    VialSimulator,
 }
 
 impl ConnectionKind {
@@ -25,6 +29,8 @@ impl ConnectionKind {
             Self::Usb => "USB",
             Self::Bluetooth => "Bluetooth",
             Self::Channel => "Simulator",
+            Self::Vial => "Vial",
+            Self::VialSimulator => "Vial sim",
         }
     }
 }

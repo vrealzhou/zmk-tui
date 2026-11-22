@@ -17,11 +17,12 @@ use zmk_tui::model::{Binding, LockState};
 use zmk_tui::simulator::SimulatedBoard;
 use zmk_tui::transport::serial::UsbDevice;
 use zmk_tui::tui::StartOptions;
-use zmk_tui::tui::app::{App, Msg, Panel, StatusKind};
-use zmk_tui::tui::connection::Snapshot;
+use zmk_tui::tui::app::{App, Msg, Panel, StatusKind, VialStart};
+use zmk_tui::tui::connection::{DeviceChoice, Snapshot, UsbEntry};
 use zmk_tui::tui::modals::{Modal, Stage, UnlockModal, behavior_items};
 use zmk_tui::tui::mouse::{ListKind, MouseTarget};
 use zmk_tui::tui::render;
+use zmk_tui::vial::transport::VialDeviceInfo;
 
 fn screen_text(app: &mut App) -> String {
     screen_text_sized(app, 120, 35)
@@ -134,6 +135,26 @@ async fn connected_app_for(board: SimulatedBoard) -> (App, UnboundedReceiver<Msg
 
 async fn connected_app() -> (App, UnboundedReceiver<Msg>) {
     connected_app_for(SimulatedBoard::Corne).await
+}
+
+async fn connected_vial_app() -> (App, UnboundedReceiver<Msg>) {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut app = App::new(
+        tx,
+        StartOptions {
+            vial: Some(VialStart::Simulate),
+            ..Default::default()
+        },
+    );
+    app.on_start();
+    pump_until(&mut app, &mut rx, "the Vial keymap", |app| {
+        app.editor
+            .as_ref()
+            .map(|editor| editor.keymap_loaded)
+            .unwrap_or(false)
+    })
+    .await;
+    (app, rx)
 }
 
 fn disconnected_app() -> App {
@@ -757,18 +778,18 @@ async fn lock_poll_results_clear_or_set_lock_state() {
 fn mouse_scroll_moves_connect_and_editor_selection() {
     let mut app = disconnected_app();
     app.connect.usb = vec![
-        UsbDevice {
+        UsbEntry::Studio(UsbDevice {
             path: "/dev/test0".into(),
             product: Some("Test Keyboard".into()),
             manufacturer: None,
             serial_number: None,
-        },
-        UsbDevice {
+        }),
+        UsbEntry::Studio(UsbDevice {
             path: "/dev/test1".into(),
             product: Some("Test Keyboard".into()),
             manufacturer: None,
             serial_number: None,
-        },
+        }),
     ];
     app.connect.usb_state.select(Some(0));
     let _ = screen_text(&mut app);
@@ -872,12 +893,12 @@ async fn unlock_modal_enter_starts_a_lock_poll() {
 fn usb_device_messages_clamp_connect_selection() {
     let mut app = disconnected_app();
     app.connect.usb_state.select(Some(9));
-    app.handle(Msg::UsbDevices(vec![UsbDevice {
+    app.handle(Msg::UsbDevices(vec![UsbEntry::Studio(UsbDevice {
         path: "/dev/test0".into(),
         product: Some("Test Keyboard".into()),
         manufacturer: None,
         serial_number: None,
-    }]));
+    })]));
     assert_eq!(app.connect.usb_state.selected(), Some(0));
 
     app.handle(Msg::UsbDevices(Vec::new()));
@@ -1235,4 +1256,232 @@ async fn trackball_layouts_render_and_navigate() {
         // bindings; the last thumb position is editable.
         assert_editor_key_targets_are_consistent(&mut app);
     }
+}
+
+#[tokio::test]
+async fn vial_simulator_uses_the_same_editor_and_capabilities() {
+    let (mut app, mut rx) = connected_vial_app().await;
+    let editor = app.editor.as_ref().expect("editor");
+    assert_eq!(editor.info.name, "Simulated Vial 4x6");
+    assert_eq!(editor.keymap.layers.len(), 4);
+    assert_eq!(editor.catalog.len(), 14);
+    assert_eq!(editor.layouts.layouts[0].keys.len(), 24);
+    assert!(!editor.capabilities.manage_layers);
+    assert!(!editor.capabilities.switch_physical_layouts);
+    assert!(!editor.locked);
+
+    let screen = screen_text(&mut app);
+    for expected in ["Simulated Vial 4x6", "VIAL SIM", "Layer 0", "A"] {
+        assert!(
+            screen.contains(expected),
+            "missing {expected:?} in:\n{screen}"
+        );
+    }
+
+    // The same binding editor works; only the catalog behind it differs.
+    let b_value = keycodes::from_name("B").unwrap().value;
+    press(&mut app, KeyCode::Enter);
+    type_text(&mut app, "key press");
+    press(&mut app, KeyCode::Enter);
+    type_text(&mut app, "b");
+    press(&mut app, KeyCode::Enter);
+    let review = screen_text(&mut app);
+    assert!(review.contains("&kp B"), "{review}");
+    press(&mut app, KeyCode::Enter);
+    pump_until(&mut app, &mut rx, "the Vial binding update", |app| {
+        app.editor
+            .as_ref()
+            .map(|editor| {
+                editor.keymap.layers[0].bindings[0].param1 == b_value
+                    && editor.dirty
+                    && app.busy.is_none()
+            })
+            .unwrap_or(false)
+    })
+    .await;
+
+    press(&mut app, KeyCode::Char('s'));
+    pump_until(&mut app, &mut rx, "the Vial save", |app| {
+        app.busy.is_none()
+            && app
+                .editor
+                .as_ref()
+                .map(|editor| !editor.dirty)
+                .unwrap_or(false)
+    })
+    .await;
+    assert!(screen_text(&mut app).contains("Saved to keyboard"));
+}
+
+#[tokio::test]
+async fn vial_layer_manager_is_not_offered() {
+    let (mut app, _rx) = connected_vial_app().await;
+    press(&mut app, KeyCode::Char('L'));
+    assert!(app.modal.is_none());
+    let status = app.status.as_ref().expect("status");
+    assert!(status.text.contains("fixed layer count"));
+    assert_eq!(status.kind, StatusKind::Warning);
+}
+
+#[tokio::test]
+async fn vial_staged_edits_can_be_discarded() {
+    let (mut app, mut rx) = connected_vial_app().await;
+    let a_value = keycodes::from_name("A").unwrap().value;
+    let b_value = keycodes::from_name("B").unwrap().value;
+
+    press(&mut app, KeyCode::Enter);
+    type_text(&mut app, "key press");
+    press(&mut app, KeyCode::Enter);
+    type_text(&mut app, "b");
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Enter);
+    pump_until(&mut app, &mut rx, "the staged Vial edit", |app| {
+        app.editor
+            .as_ref()
+            .map(|editor| editor.keymap.layers[0].bindings[0].param1 == b_value)
+            .unwrap_or(false)
+    })
+    .await;
+
+    press(&mut app, KeyCode::Char('d'));
+    press(&mut app, KeyCode::Char('y'));
+    pump_until(&mut app, &mut rx, "the Vial discard", |app| {
+        app.busy.is_none()
+            && app
+                .editor
+                .as_ref()
+                .map(|editor| {
+                    editor.keymap.layers[0].bindings[0].param1 == a_value && !editor.dirty
+                })
+                .unwrap_or(false)
+    })
+    .await;
+}
+
+#[test]
+fn connect_screen_labels_studio_and_vial_rows() {
+    let mut app = disconnected_app();
+    app.connect.usb = vec![
+        UsbEntry::Studio(UsbDevice {
+            path: "/dev/cu.studio".into(),
+            product: Some("Sofle".into()),
+            manufacturer: None,
+            serial_number: None,
+        }),
+        UsbEntry::Vial(VialDeviceInfo {
+            name: "Sofle Vial".into(),
+            path: "hid-path".into(),
+            vendor_id: 0x1234,
+            product_id: 0x5678,
+            serial: "vial:f64c2b3c".into(),
+        }),
+    ];
+    app.connect.usb_state.select(Some(0));
+    let screen = screen_text(&mut app);
+    assert!(screen.contains("USB / HID"), "{screen}");
+    assert!(screen.contains("Sofle (ZMK Studio)"), "{screen}");
+    assert!(screen.contains("Sofle Vial (Vial)"), "{screen}");
+
+    assert_eq!(app.connect.usb[0].standard(), "ZMK Studio");
+    assert_eq!(app.connect.usb[1].standard(), "Vial");
+    assert!(matches!(
+        app.connect.usb[0].choice(),
+        DeviceChoice::Usb { .. }
+    ));
+    assert!(matches!(
+        app.connect.usb[1].choice(),
+        DeviceChoice::Vial { .. }
+    ));
+}
+
+#[test]
+fn auto_connect_only_when_exactly_one_keyboard_is_visible() {
+    let mut app = disconnected_app();
+    app.connect.usb = Vec::new();
+    assert!(app.auto_connect_choice().is_none());
+
+    app.connect.usb = vec![UsbEntry::Vial(VialDeviceInfo {
+        name: "Sofle Vial".into(),
+        path: "hid-path".into(),
+        vendor_id: 0x1234,
+        product_id: 0x5678,
+        serial: "vial:f64c2b3c".into(),
+    })];
+    assert!(matches!(
+        app.auto_connect_choice(),
+        Some(DeviceChoice::Vial { .. })
+    ));
+
+    app.connect.usb = vec![
+        UsbEntry::Studio(UsbDevice {
+            path: "/dev/cu.studio".into(),
+            product: Some("Sofle".into()),
+            manufacturer: None,
+            serial_number: None,
+        }),
+        UsbEntry::Vial(VialDeviceInfo {
+            name: "Sofle Vial".into(),
+            path: "hid-path".into(),
+            vendor_id: 0x1234,
+            product_id: 0x5678,
+            serial: "vial:f64c2b3c".into(),
+        }),
+    ];
+    assert!(
+        app.auto_connect_choice().is_none(),
+        "two candidates must be left to the user"
+    );
+}
+
+#[tokio::test]
+async fn back_returns_to_the_device_list_from_a_clean_editor() {
+    let (mut app, _rx) = connected_app().await;
+    press(&mut app, KeyCode::Char('b'));
+    assert!(app.editor.is_none());
+    assert!(app.modal.is_none());
+    assert!(!app.should_quit);
+    assert!(
+        app.status
+            .as_ref()
+            .is_some_and(|status| status.text.contains("Choose a keyboard"))
+    );
+}
+
+#[tokio::test]
+async fn back_with_unsaved_changes_can_leave_without_saving() {
+    let (mut app, _rx) = connected_app().await;
+    app.editor.as_mut().unwrap().dirty = true;
+    press(&mut app, KeyCode::Char('b'));
+    assert!(matches!(app.modal, Some(Modal::Confirm(_))));
+    press(&mut app, KeyCode::Char('b'));
+    assert!(app.editor.is_none());
+    assert!(app.modal.is_none());
+    assert!(!app.should_quit);
+}
+
+#[tokio::test]
+async fn back_with_unsaved_changes_can_save_then_leave() {
+    let (mut app, mut rx) = connected_app().await;
+    app.editor.as_mut().unwrap().dirty = true;
+    press(&mut app, KeyCode::Char('b'));
+    press(&mut app, KeyCode::Char('s'));
+    pump_until(&mut app, &mut rx, "save then devices", |app| {
+        app.editor.is_none() && app.busy.is_none()
+    })
+    .await;
+    assert!(
+        app.status
+            .as_ref()
+            .is_some_and(|status| status.text.contains("Saved"))
+    );
+    assert!(!app.should_quit);
+}
+
+#[tokio::test]
+async fn vial_editor_can_return_to_the_device_list() {
+    let (mut app, _rx) = connected_vial_app().await;
+    press(&mut app, KeyCode::Char('b'));
+    assert!(app.editor.is_none());
+    assert!(app.modal.is_none());
+    assert!(!app.should_quit);
 }
