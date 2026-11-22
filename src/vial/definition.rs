@@ -94,6 +94,12 @@ impl KeyboardDefinition {
         let mut width = 1.0f32;
         let mut height = 1.0f32;
         let mut decal = false;
+        // KLE rotation cluster state: `r` is the angle and `rx`/`ry` the
+        // rotation origin. Keys inside a cluster have coordinates relative to
+        // that origin; after every row the cursor returns to `rotation_x`.
+        let mut rotation = 0.0f32;
+        let mut rotation_x = 0.0f32;
+        let mut rotation_y = 0.0f32;
         let mut seen = BTreeMap::<(u8, u8), usize>::new();
 
         for row in keymap {
@@ -102,6 +108,20 @@ impl KeyboardDefinition {
             };
             for item in items {
                 if let Some(object) = item.as_object() {
+                    // Process in KLE's order: r, rx, ry, then relative x/y.
+                    if let Some(value) = object.get("r").and_then(Value::as_f64) {
+                        rotation = value as f32;
+                    }
+                    if let Some(value) = object.get("rx").and_then(Value::as_f64) {
+                        rotation_x = value as f32;
+                        x = rotation_x;
+                        y = rotation_y;
+                    }
+                    if let Some(value) = object.get("ry").and_then(Value::as_f64) {
+                        rotation_y = value as f32;
+                        x = rotation_x;
+                        y = rotation_y;
+                    }
                     x += number(object.get("x"));
                     y += number(object.get("y"));
                     if let Some(value) = object.get("w").and_then(Value::as_f64) {
@@ -138,12 +158,17 @@ impl KeyboardDefinition {
                             std::collections::btree_map::Entry::Vacant(entry) => {
                                 let index = definition.keys.len();
                                 entry.insert(index);
+                                let (key_x, key_y) =
+                                    rotated_topleft(x, y, rotation, rotation_x, rotation_y);
                                 definition.keys.push(KeyPosition {
                                     row,
                                     col,
+                                    // The TUI draws axis-aligned boxes, so bake
+                                    // the KLE rotation into x/y instead of
+                                    // storing an angle it would ignore.
                                     geometry: KeyGeometry {
-                                        x,
-                                        y,
+                                        x: key_x,
+                                        y: key_y,
                                         width,
                                         height,
                                         ..Default::default()
@@ -159,7 +184,7 @@ impl KeyboardDefinition {
                 decal = false;
             }
             y += 1.0;
-            x = 0.0;
+            x = rotation_x;
         }
 
         if definition.keys.is_empty() {
@@ -204,6 +229,22 @@ fn dimension(matrix: &Value, field: &str) -> Result<u8> {
         .ok()
         .filter(|value| *value > 0)
         .ok_or_else(|| VialError::Definition(format!("matrix.{field} out of range")))
+}
+
+/// Apply a KLE rotation around `(origin_x, origin_y)` to a key's top-left.
+/// Positive angles follow KLE's screen-coordinate convention (clockwise).
+fn rotated_topleft(x: f32, y: f32, angle: f32, origin_x: f32, origin_y: f32) -> (f32, f32) {
+    if angle == 0.0 {
+        return (x, y);
+    }
+    let radians = angle.to_radians();
+    let (sin, cos) = radians.sin_cos();
+    let dx = x - origin_x;
+    let dy = y - origin_y;
+    (
+        origin_x + dx * cos - dy * sin,
+        origin_y + dx * sin + dy * cos,
+    )
 }
 
 fn number(value: Option<&Value>) -> f32 {
@@ -281,6 +322,28 @@ mod tests {
         }"##;
         let error = KeyboardDefinition::parse(out_of_range).unwrap_err();
         assert!(error.to_string().contains("0,4"));
+    }
+
+    #[test]
+    fn rotation_clusters_are_baked_into_absolute_positions() {
+        let json = br##"{
+            "matrix": {"rows": 1, "cols": 3},
+            "layouts": {"keymap": [
+                [{"x": 4}, "0,0"],
+                [{"r": 15, "rx": 4.5, "ry": 9.1, "y": -4.85, "x": -0.5}, "0,1"],
+                [{"r": 0, "x": 0.5}, "0,2"]
+            ]}
+        }"##;
+        let definition = KeyboardDefinition::parse(json).unwrap();
+        let first = definition.keys[0].geometry;
+        let rotated = definition.keys[1].geometry;
+        assert_eq!((first.x, first.y), (4.0, 0.0));
+        assert!((rotated.x - 5.2723).abs() < 0.001, "{rotated:?}");
+        assert!((rotated.y - 4.2859).abs() < 0.001, "{rotated:?}");
+        // After a rotated row the cursor returns to the cluster origin, not 0.
+        let after = definition.keys[2].geometry;
+        assert!((after.x - 5.0).abs() < 0.001, "{after:?}");
+        assert!((after.y - 5.25).abs() < 0.001, "{after:?}");
     }
 
     #[test]

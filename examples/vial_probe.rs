@@ -12,6 +12,8 @@
 //! cargo run --example vial_probe -- --real --list
 //! cargo run --example vial_probe -- --real
 //! cargo run --example vial_probe -- --hid     # every HID interface, diagnostics
+//! cargo run --example vial_probe -- --definition  # raw embedded vial.json
+//! cargo run --example vial_probe -- --layout      # parsed key coordinates
 //! ```
 //!
 //! `--write-test` writes the existing keycode back to layer 0, position 0
@@ -20,11 +22,11 @@
 
 use std::process::ExitCode;
 
-use zmk_tui::vial::RawHid;
 use zmk_tui::vial::keycode::{Dialect, Translator, behavior};
 use zmk_tui::vial::session::VialKeyboard;
 use zmk_tui::vial::simulate::SimulatedVial;
 use zmk_tui::vial::vil::VilDocument;
+use zmk_tui::vial::{RawHid, VialDevice};
 
 fn main() -> ExitCode {
     match run() {
@@ -43,6 +45,12 @@ fn run() -> Result<(), String> {
     }
     if args.iter().any(|arg| arg == "--hid" || arg == "--list-all") {
         return hid_list();
+    }
+    if args.iter().any(|arg| arg == "--definition") {
+        return definition();
+    }
+    if args.iter().any(|arg| arg == "--layout") {
+        return layout();
     }
     if args.iter().any(|arg| arg == "--list") {
         return list();
@@ -173,6 +181,50 @@ fn print_layer<T: RawHid>(keyboard: &VialKeyboard<T>, layer: usize, count: usize
             keyboard.keycode_at(layer, index).unwrap_or(0)
         );
     }
+}
+
+fn definition() -> Result<(), String> {
+    let transport =
+        zmk_tui::vial::transport::VialHid::open_first().map_err(|error| error.to_string())?;
+    let mut device = VialDevice::new(transport);
+    let json = device
+        .definition_json()
+        .map_err(|error| error.to_string())?;
+    println!(
+        "{}",
+        String::from_utf8(json).map_err(|error| format!("definition is not UTF-8: {error}"))?
+    );
+    Ok(())
+}
+
+fn layout() -> Result<(), String> {
+    let keyboard = VialKeyboard::open(
+        zmk_tui::vial::transport::VialHid::open_first().map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    let translator = Translator::new(Dialect::from_vial_protocol(keyboard.info().vial.protocol));
+    let bindings = keyboard
+        .keymap()
+        .layers
+        .first()
+        .map(|layer| layer.bindings.clone())
+        .unwrap_or_default();
+    for (index, key) in keyboard.definition().keys.iter().enumerate() {
+        println!(
+            "{index:>2}  matrix=({}, {})  x={:.2} y={:.2} w={:.2} h={:.2}  {}",
+            key.row,
+            key.col,
+            key.geometry.x,
+            key.geometry.y,
+            key.geometry.width,
+            key.geometry.height,
+            bindings
+                .get(index)
+                .map(|binding| translator.label(*binding))
+                .unwrap_or_default()
+        );
+    }
+    Ok(())
 }
 
 fn hid_list() -> Result<(), String> {

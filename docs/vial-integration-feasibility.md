@@ -12,7 +12,7 @@
 | 能不能复用现在的 UI？ | **能，且已用模拟器验证。** 仍是同一个 `App`、同一套按键/弹窗/保存/丢弃/恢复流程；Vial 只是第二个设备后端。 |
 | 键位模型冲突大不大？ | **中等，但可控。** 用 14 个伪 behavior 把 QMK 16 位键码投影到现有 `Binding` 模型；无法结构化的键码一律保留原始值，读改写不会丢数据。 |
 | "Vial 不太稳定"是不是真的？ | **协议本身很稳；生态版本耦合才是风险。** Vial 固件和 GUI 对协议版本、QMK 键码编号有硬耦合；GUI 更新慢；只走 USB；宏/Tap Dance/Combos 等是另一套扩展。 |
-| 今天做到哪一步？ | 模拟器端到端可编辑、可保存、可丢弃、可恢复；连接页自动识别 Studio / Vial；只有一个候选时启动即自动连接；编辑器内按 `b` 可带未保存确认回到设备列表；103 个库测试 + 47 个 TUI 测试 + 13 个 Vial 集成测试通过，完整质量门通过。 |
+| 今天做到哪一步？ | 模拟器端到端可编辑、可保存、可丢弃、可恢复；连接页自动识别 Studio / Vial；只有一个候选时启动即自动连接；编辑器内按 `b` 可带未保存确认回到设备列表；104 个库测试 + 47 个 TUI 测试 + 13 个 Vial 集成测试通过，完整质量门通过。 |
 | 明天真机先做什么？ | 只读探测（版本/UID/矩阵/定义/层数）→ `.vil` 备份 → 改一个空闲键 → 读回校验 → 恢复。清单见 §9。 |
 
 **可行性评级：**
@@ -65,7 +65,7 @@ ZMK Studio RPC          VialKeyboard（暂存、校验、能力）
 | --- | --- |
 | `src/device.rs` | `DeviceClient`：Studio / Vial 两个后端的统一方法面 + capability |
 | `src/vial/protocol.rs` | VIA/Vial 命令、32 字节报文、版本握手、定义分页、解锁、宏计数 |
-| `src/vial/definition.rs` | 解析固件内嵌的 `vial.json`（KLE 布局、矩阵、去重、编码器计数） |
+| `src/vial/definition.rs` | 解析固件内嵌的 `vial.json`（KLE 布局、旋转簇、矩阵、去重、编码器计数） |
 | `src/vial/keycode.rs` | QMK 16 位键码 ↔ `Binding` 的双向映射、14 个伪 behavior、v5/v6 键码方言 |
 | `src/vial/session.rs` | 读整个键位表、暂存编辑、保存（含读回校验）、丢弃、恢复、能力声明 |
 | `src/vial/client.rs` | `VialClient`：把 Vial 错误映射成现有 `StudioError`，接进 UI |
@@ -199,7 +199,7 @@ QMK 一个格子是一个 16 位键码；现有模型是 `{behavior_id, param1, 
 | --- | --- | --- | --- |
 | 固件 Vial 协议 <5 或 >6 | 低 | 无法连接 | 明确报错；不猜测键码表 |
 | 键码方言判断错 | 低 | 写错键 | 按协议选 v5/v6；穷举 round-trip 测试 |
-| 定义 JSON 超出 KLE 子集 | 中 | 布局缺失/错位 | 去重 + warning；矩阵坐标仍正确；真机核对 |
+| 定义 JSON 超出 KLE 子集 | 中 | 布局缺失/错位 | 支持 KLE 旋转簇（`r`/`rx`/`ry`）；去重 + warning；真机核对 |
 | 锁定/宏写入被拒 | 中 | 保存失败 | 只编辑键位；读回校验；错误原样提示 |
 | 中途断线 | 中 | 部分键已写 | 备份 + 重试 + `R` 恢复；文档写明无事务 |
 | GUI/固件版本错位 | 中 | 显示/写入不一致 | 记录 VIA/Vial 版本；必要时用 Vial GUI 交叉验证 |
@@ -228,7 +228,7 @@ TUI 模拟器路径（`--simulate-vial`）由 `tests/tui.rs` 覆盖：
 - 未保存时 `d` 丢弃，键位回到 `A`；
 - `L` 不打开层管理，提示 "fixed layer count"。
 
-当前测试统计：库 103、client 3、TUI 47、Vial 13、cucumber 4；`clippy -D warnings` 与 `fmt` 通过；默认构建即包含真实 Vial USB 传输。
+当前测试统计：库 104、client 3、TUI 47、Vial 13、cucumber 4；`clippy -D warnings` 与 `fmt` 通过；默认构建即包含真实 Vial USB 传输。
 
 ## 9. 明日真机验证清单
 
