@@ -76,6 +76,24 @@ cargo build --release
 ./target/release/zmk-tui
 ```
 
+On Windows, install Rust with the MSVC toolchain and the Visual Studio
+"Desktop development with C++" workload first; then the same `cargo install`
+command works and produces `%USERPROFILE%\.cargo\bin\zmk-tui.exe`.
+
+### Windows (prebuilt zip)
+
+Windows has no Homebrew. Release builds include a prebuilt x86_64 zip:
+
+```powershell
+# Download the latest zmk-tui-<version>-x86_64-pc-windows-msvc.zip
+Expand-Archive .\zmk-tui-<version>-x86_64-pc-windows-msvc.zip -DestinationPath $env:LOCALAPPDATA\zmk-tui
+& "$env:LOCALAPPDATA\zmk-tui\zmk-tui.exe" --simulate
+```
+
+Run it from **Windows Terminal** (not the legacy console) for correct mouse and
+key handling. To make it available as `zmk-tui`, add the extraction directory to
+your user `PATH`.
+
 ### Direct download
 
 Release archives are published on the
@@ -83,6 +101,7 @@ Release archives are published on the
 
 - macOS: `zmk-tui-<version>-universal-apple-darwin.tar.gz` (Apple Silicon and Intel)
 - Linux x86_64: `zmk-tui-<version>-x86_64-unknown-linux-gnu.tar.gz`
+- Windows x86_64: `zmk-tui-<version>-x86_64-pc-windows-msvc.zip`
 
 Extract the archive and put `zmk-tui` somewhere on your `PATH`. The Linux
 binary uses the distribution's `libdbus-1` and `libudev`; on Debian/Ubuntu:
@@ -199,7 +218,9 @@ west build -b nice_nano//zmk -S studio-rpc-usb-uart -- \
 - Linux: BlueZ/DBus and udev headers may be needed (`libdbus-1-dev`,
   `libudev-dev`), and your user may need `dialout`/`uucp` membership for the
   serial port.
-- Windows: the same protocol applies, but this build has not been tested there.
+- Windows: prebuilt builds are produced in CI; USB serial, raw HID and BLE are
+  available through the same transport code, but hardware paths have not been
+  tested on every Windows setup.
 
 ## Build and run
 
