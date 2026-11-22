@@ -1,12 +1,26 @@
 class ZmkTui < Formula
   desc "Terminal UI for editing ZMK keymaps over USB or Bluetooth"
   homepage "https://github.com/vrealzhou/zmk-tui"
-  url "https://github.com/vrealzhou/zmk-tui/releases/download/v0.1.0/zmk-tui-0.1.0-universal-apple-darwin.tar.gz"
   version "0.1.0"
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
   license "MIT"
 
-  depends_on :macos
+  on_macos do
+    on_arm do
+      url "https://github.com/vrealzhou/zmk-tui/releases/download/v0.1.0/zmk-tui-0.1.0-universal-apple-darwin.tar.gz"
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+    end
+    on_intel do
+      url "https://github.com/vrealzhou/zmk-tui/releases/download/v0.1.0/zmk-tui-0.1.0-universal-apple-darwin.tar.gz"
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+    end
+  end
+
+  on_linux do
+    on_intel do
+      url "https://github.com/vrealzhou/zmk-tui/releases/download/v0.1.0/zmk-tui-0.1.0-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+    end
+  end
 
   def install
     bin.install "zmk-tui"
@@ -18,6 +32,9 @@ class ZmkTui < Formula
 
       On macOS, grant Bluetooth permission to your terminal app before
       connecting to a keyboard over BLE.
+
+      On Linux, the prebuilt binary uses the distribution's libdbus-1 and
+      libudev (normally already installed on desktop systems).
     EOS
   end
 

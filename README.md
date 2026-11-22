@@ -38,11 +38,11 @@ For architecture, protocol, testing and contribution details, see the
 
 ## Installation
 
-### Homebrew (macOS, prebuilt)
+### Homebrew (macOS and Linux, prebuilt)
 
-GitHub Actions builds a universal macOS binary (Apple Silicon and Intel) for
-each release. The formula in this repository installs that binary, so no Rust
-toolchain is needed:
+GitHub Actions builds a universal macOS binary (Apple Silicon and Intel) and a
+Linux x86_64 binary for each release. The formula in this repository installs
+the matching binary, so no Rust toolchain is needed:
 
 ```bash
 brew tap vrealzhou/zmk-tui https://github.com/vrealzhou/zmk-tui
@@ -78,13 +78,20 @@ cargo build --release
 
 ### Direct download
 
-Release archives are published as
-`zmk-tui-<version>-universal-apple-darwin.tar.gz` on the
-[releases page](https://github.com/vrealzhou/zmk-tui/releases). Extract the
-archive and put `zmk-tui` somewhere on your `PATH`.
+Release archives are published on the
+[releases page](https://github.com/vrealzhou/zmk-tui/releases):
 
-The prebuilt archive is macOS-only. Linux and other platforms can build from
-source; see [Host requirements](#host).
+- macOS: `zmk-tui-<version>-universal-apple-darwin.tar.gz` (Apple Silicon and Intel)
+- Linux x86_64: `zmk-tui-<version>-x86_64-unknown-linux-gnu.tar.gz`
+
+Extract the archive and put `zmk-tui` somewhere on your `PATH`. The Linux
+binary uses the distribution's `libdbus-1` and `libudev`; on Debian/Ubuntu:
+
+```bash
+sudo apt install libdbus-1-3 libudev1
+```
+
+Other platforms can build from source; see [Host requirements](#host).
 
 ## Vial keyboards (experimental)
 
