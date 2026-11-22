@@ -101,14 +101,17 @@ jobs:
           echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
           git checkout "$TAG"
 
-      - uses: dtolnay/rust-toolchain@stable
+      # bluer 0.16.1 (pulled in by bluest 0.6.9) does not compile with the
+      # never-type fallback in Rust 1.100. Rust 1.98.1 is the newest verified
+      # toolchain for this dependency set.
+      - uses: dtolnay/rust-toolchain@1.98.1
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libdbus-1-dev libudev-dev pkg-config
+          sudo apt-get install -y libdbus-1-dev libudev-dev pkg-config file
 
       - name: Build Linux binary
         id: build

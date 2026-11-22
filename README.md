@@ -217,7 +217,9 @@ west build -b nice_nano//zmk -S studio-rpc-usb-uart -- \
 - macOS: allow Bluetooth access for your terminal when prompted.
 - Linux: BlueZ/DBus and udev headers may be needed (`libdbus-1-dev`,
   `libudev-dev`), and your user may need `dialout`/`uucp` membership for the
-  serial port.
+  serial port. Source builds currently need Rust **1.98.1** because
+  `bluer` 0.16.1 does not compile with the Rust 1.100 never-type fallback;
+  `cargo +1.98.1 build --release` is the verified configuration.
 - Windows: prebuilt builds are produced in CI; USB serial, raw HID and BLE are
   available through the same transport code, but hardware paths have not been
   tested on every Windows setup.
