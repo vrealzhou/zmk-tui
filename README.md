@@ -36,6 +36,56 @@ For architecture, protocol, testing and contribution details, see the
 | --- | --- |
 | ![Behavior picker](docs/screenshots/binding-behavior.png) | ![Keycode picker](docs/screenshots/binding-param.png) |
 
+## Installation
+
+### Homebrew (macOS, prebuilt)
+
+GitHub Actions builds a universal macOS binary (Apple Silicon and Intel) for
+each release. The formula in this repository installs that binary, so no Rust
+toolchain is needed:
+
+```bash
+brew tap vrealzhou/zmk-tui https://github.com/vrealzhou/zmk-tui
+brew trust vrealzhou/zmk-tui
+brew install vrealzhou/zmk-tui/zmk-tui
+```
+
+`brew trust` is required by Homebrew 7 for third-party taps; on older Homebrew
+versions you can skip it. The formula lives at
+[`Formula/zmk-tui.rb`](Formula/zmk-tui.rb).
+
+If the release asset is not available yet, or you prefer a local build, use the
+source installation below.
+
+### From source
+
+Requirements: Rust **1.85+** and the platform dependencies listed in
+[Host requirements](#host).
+
+```bash
+git clone https://github.com/vrealzhou/zmk-tui.git
+cd zmk-tui
+cargo install --path . --locked
+```
+
+This installs `zmk-tui` into `~/.cargo/bin` (make sure it is on `PATH`).
+Alternatively, build a release binary in the checkout:
+
+```bash
+cargo build --release
+./target/release/zmk-tui
+```
+
+### Direct download
+
+Release archives are published as
+`zmk-tui-<version>-universal-apple-darwin.tar.gz` on the
+[releases page](https://github.com/vrealzhou/zmk-tui/releases). Extract the
+archive and put `zmk-tui` somewhere on your `PATH`.
+
+The prebuilt archive is macOS-only. Linux and other platforms can build from
+source; see [Host requirements](#host).
+
 ## Vial keyboards (experimental)
 
 The same editor can also edit keymaps on [Vial](https://get.vial.today)
@@ -185,6 +235,7 @@ connected to another host will not appear in the Bluetooth list.
 | `L` | Layer manager |
 | `p` | Physical layout picker |
 | `u` | Unlock instructions |
+| `W` | Warnings reported while loading the keymap/catalog |
 | `s` | Save changes to the keyboard |
 | `d` | Discard unsaved changes (confirm) |
 | `R` | Restore stock firmware settings (confirm) |
