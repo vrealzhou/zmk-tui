@@ -57,6 +57,11 @@ shortcut that opens the first Vial interface directly.
 cargo run -- --vial
 ```
 
+Vial's configuration endpoint is USB raw HID. A 2.4G receiver only works if it
+tunnels that endpoint to the keyboard; if `--hid` shows no interface with usage
+page `0xFF60` / usage `0x61`, the receiver does not expose Vial configuration
+and the keyboard must be connected by cable.
+
 Vial support is intentionally keycode-only: bindings, layers (fixed count) and
 save/discard/reset work through the same UI. Macros, tap dance, combos, key
 overrides, QMK settings, encoders and physical-layout switching are not edited;
@@ -239,6 +244,10 @@ reserved-layer setup.
   space or reduce the number of saved settings.
 - **“RPC not found”** — the firmware is too old or does not have Studio enabled;
   rebuild with `CONFIG_ZMK_STUDIO=y`.
+- **Vial keyboard not found over a 2.4G receiver** — run
+  `cargo run --example vial_probe -- --hid` and look for usage page `0xFF60` /
+  usage `0x61`. If it is absent, the receiver only exposes a normal keyboard
+  endpoint; connect the keyboard by USB cable.
 
 ## Known limitations
 

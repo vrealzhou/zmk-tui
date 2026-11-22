@@ -557,6 +557,10 @@ fn render_usb_panel(
                     "Studio uses a serial port; Vial uses raw HID.",
                     theme::dim(),
                 )),
+                Line::from(Span::styled(
+                    "A 2.4G receiver may not expose the Vial raw-HID endpoint.",
+                    theme::dim(),
+                )),
             ])
             .wrap(Wrap { trim: true })
             .style(theme::panel()),

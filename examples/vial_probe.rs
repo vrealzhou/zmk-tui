@@ -11,6 +11,7 @@
 //! ```bash
 //! cargo run --example vial_probe -- --real --list
 //! cargo run --example vial_probe -- --real
+//! cargo run --example vial_probe -- --hid     # every HID interface, diagnostics
 //! ```
 //!
 //! `--write-test` writes the existing keycode back to layer 0, position 0
@@ -39,6 +40,9 @@ fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--real") {
         return real(&args);
+    }
+    if args.iter().any(|arg| arg == "--hid" || arg == "--list-all") {
+        return hid_list();
     }
     if args.iter().any(|arg| arg == "--list") {
         return list();
@@ -169,6 +173,27 @@ fn print_layer<T: RawHid>(keyboard: &VialKeyboard<T>, layer: usize, count: usize
             keyboard.keycode_at(layer, index).unwrap_or(0)
         );
     }
+}
+
+fn hid_list() -> Result<(), String> {
+    let devices = zmk_tui::vial::transport::list_all().map_err(|error| error.to_string())?;
+    if devices.is_empty() {
+        println!("No HID interfaces found.");
+    }
+    for device in devices {
+        println!(
+            "  {:04X}:{:04X} usage={:04X}/{:02X} vial_serial={} product={:?} serial={:?} path={}",
+            device.vendor_id,
+            device.product_id,
+            device.usage_page,
+            device.usage,
+            device.is_vial,
+            device.product,
+            device.serial,
+            device.path
+        );
+    }
+    Ok(())
 }
 
 fn list() -> Result<(), String> {

@@ -12,7 +12,7 @@
 | 能不能复用现在的 UI？ | **能，且已用模拟器验证。** 仍是同一个 `App`、同一套按键/弹窗/保存/丢弃/恢复流程；Vial 只是第二个设备后端。 |
 | 键位模型冲突大不大？ | **中等，但可控。** 用 14 个伪 behavior 把 QMK 16 位键码投影到现有 `Binding` 模型；无法结构化的键码一律保留原始值，读改写不会丢数据。 |
 | "Vial 不太稳定"是不是真的？ | **协议本身很稳；生态版本耦合才是风险。** Vial 固件和 GUI 对协议版本、QMK 键码编号有硬耦合；GUI 更新慢；只走 USB；宏/Tap Dance/Combos 等是另一套扩展。 |
-| 今天做到哪一步？ | 模拟器端到端可编辑、可保存、可丢弃、可恢复；连接页自动识别 Studio / Vial；只有一个候选时启动即自动连接；编辑器内按 `b` 可带未保存确认回到设备列表；102 个库测试 + 47 个 TUI 测试 + 13 个 Vial 集成测试通过，完整质量门通过。 |
+| 今天做到哪一步？ | 模拟器端到端可编辑、可保存、可丢弃、可恢复；连接页自动识别 Studio / Vial；只有一个候选时启动即自动连接；编辑器内按 `b` 可带未保存确认回到设备列表；103 个库测试 + 47 个 TUI 测试 + 13 个 Vial 集成测试通过，完整质量门通过。 |
 | 明天真机先做什么？ | 只读探测（版本/UID/矩阵/定义/层数）→ `.vil` 备份 → 改一个空闲键 → 读回校验 → 恢复。清单见 §9。 |
 
 **可行性评级：**
@@ -94,7 +94,7 @@ ZMK Studio RPC          VialKeyboard（暂存、校验、能力）
 一手来源：`vial-kb/vial-qmk` 的 `quantum/via.h`、`quantum/via.c`、`quantum/vial.h`、`quantum/vial.c`，以及 `vial-kb/vial-gui` 的 `protocol/keyboard_comm.py`。
 
 - HID 接口：usage page **0xFF60**、usage **0x61**；固定 **32 字节**报文，写一条读一条，无帧头/长度/请求 ID。
-- 设备发现：HID serial number 含 `vial:f64c2b3c`；或 VID/PID 命中 VIA 定义库。Vial GUI 两者都认。
+- 设备发现：HID serial number 含 `vial:f64c2b3c`（`build_vial.mk` 固定定义）；或 VID/PID 命中 VIA 定义库。Vial GUI 两者都认。本实现还支持对没有 serial magic 的 `0xFF60/0x61` 接口做一次只读 Vial ID 探测，以覆盖部分 2.4G 接收器/第三方构建。
 - 版本：
   - VIA 协议：`0x01` 返回大端 16 位；`vial-qmk` 是 **0x0009**，上游 QMK 已到 **0x000D**（`via.h`）。
   - Vial 协议：`0xFE 0x00` 返回小端 32 位 + 8 字节 UID；当前固件是 **6**。
@@ -170,6 +170,7 @@ QMK 一个格子是一个 16 位键码；现有模型是 `{behavior_id, param1, 
 - **多键盘/多接口**：连接页会列出所有候选；但 `--vial` 快捷方式仍取"第一个 serial 含 `vial:` 的接口，否则第一个 0xFF60/0x61 接口"。多把 Vial 键盘同时插入时用连接页选择，或先用 `--list` 确认。
 - **平台权限**：macOS 可能要求终端有输入监控/蓝牙权限；Linux 需要 udev 规则（Vial 文档有）；Windows 未验证。
 - **BLE 不可能**：Vial 的编辑通道是 USB raw HID；本实现也只做了 USB。不要把"无线 Vial"写进预期。
+- **2.4G 接收器不一定透传 raw HID**：键盘通过 2.4G dongle 连接时，主机看到的可能只是普通键盘 HID 接口；如果 dongle 没有把 usage page `0xFF60`/usage `0x61` 的 Vial 端点桥接出来，任何主機工具（包括 Vial GUI）都改不了键位。先用 `vial_probe --hid` 看是否存在该接口；没有就必须有线连接。若 dongle 透传了 raw HID 但没有 Vial serial magic，本实现会自动做一次只读 `vial_get_keyboard_id` 探测兜底。
 
 ### 6.4 测试/质量门冲突
 
@@ -227,7 +228,7 @@ TUI 模拟器路径（`--simulate-vial`）由 `tests/tui.rs` 覆盖：
 - 未保存时 `d` 丢弃，键位回到 `A`；
 - `L` 不打开层管理，提示 "fixed layer count"。
 
-当前测试统计：库 102、client 3、TUI 47、Vial 13、cucumber 4；`clippy -D warnings` 与 `fmt` 通过；默认构建即包含真实 Vial USB 传输。
+当前测试统计：库 103、client 3、TUI 47、Vial 13、cucumber 4；`clippy -D warnings` 与 `fmt` 通过；默认构建即包含真实 Vial USB 传输。
 
 ## 9. 明日真机验证清单
 
@@ -258,6 +259,7 @@ cargo run --example vial_probe -- --real
 - [ ] 矩阵 rows×cols、物理键数、层数
 - [ ] 前 12 个键的 label 与 Vial GUI 一致（尤其 LT/MT/媒体键）
 - [ ] warnings：重复矩阵格、编码器数量、Raw 键码数量、锁定状态
+- [ ] 若是 2.4G 接收器，先跑 `vial_probe --hid`，确认 usage `0xFF60/0x61` 存在；不存在就换有线
 - [ ] 备份文件已写到 `/tmp/zmk-tui-vial-backup.vil`，复制到安全位置
 
 ### 9.3 单键写入

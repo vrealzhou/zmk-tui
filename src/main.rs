@@ -91,10 +91,31 @@ async fn list_devices() -> anyhow::Result<()> {
     }
 
     println!();
-    println!("Vial raw-HID keyboards:");
+    println!("Raw HID interfaces on usage page 0xFF60 / usage 0x61:");
+    match zmk_tui::vial::transport::list() {
+        Ok(devices) if devices.is_empty() => println!("  (none)"),
+        Ok(devices) => {
+            for device in devices {
+                println!(
+                    "  {:04X}:{:04X} {} vial_serial={} serial={:?} path={}",
+                    device.vendor_id,
+                    device.product_id,
+                    device.product,
+                    device.is_vial,
+                    device.serial,
+                    device.path
+                );
+            }
+        }
+        Err(error) => println!("  HID enumeration failed: {error}"),
+    }
+
+    println!();
+    println!("Detected Vial keyboards:");
     let vial = zmk_tui::vial::transport::list_vial_devices();
     if vial.is_empty() {
         println!("  (none)");
+        println!("  If this is a 2.4G receiver, try a wired USB connection.");
     }
     for device in vial {
         println!(

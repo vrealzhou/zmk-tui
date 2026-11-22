@@ -12,7 +12,8 @@
 use hidapi::{HidApi, HidDevice};
 
 use crate::vial::protocol::{
-    HID_USAGE, HID_USAGE_PAGE, REPORT_SIZE, RawHid, Result, SERIAL_MAGIC, VialError,
+    HID_USAGE, HID_USAGE_PAGE, REPORT_SIZE, RawHid, Result, SERIAL_MAGIC, VIAL_PROTOCOL_MAX,
+    VialDevice, VialError, VialId,
 };
 
 /// A short description of a discovered raw-HID interface.
@@ -23,6 +24,8 @@ pub struct HidDescriptor {
     pub serial: String,
     pub product: String,
     pub path: String,
+    pub usage_page: u16,
+    pub usage: u16,
     pub is_vial: bool,
 }
 
@@ -48,12 +51,12 @@ impl VialDeviceInfo {
     }
 }
 
-/// Enumerate the raw-HID interfaces that look like Vial or VIA keyboards.
-pub fn list() -> Result<Vec<HidDescriptor>> {
+/// Enumerate every HID interface. Used by diagnostics to see what a 2.4G
+/// receiver actually exposes (a plain keyboard endpoint has no Vial protocol).
+pub fn list_all() -> Result<Vec<HidDescriptor>> {
     let api = HidApi::new().map_err(|error| VialError::Transport(error.to_string()))?;
     Ok(api
         .device_list()
-        .filter(|device| device.usage_page() == HID_USAGE_PAGE && device.usage() == HID_USAGE)
         .map(|device| {
             let serial = device.serial_number().unwrap_or_default().to_string();
             HidDescriptor {
@@ -63,21 +66,49 @@ pub fn list() -> Result<Vec<HidDescriptor>> {
                 serial,
                 product: device.product_string().unwrap_or_default().to_string(),
                 path: device.path().to_string_lossy().into_owned(),
+                usage_page: device.usage_page(),
+                usage: device.usage(),
             }
         })
         .collect())
 }
 
-/// Enumerate only interfaces whose serial number carries Vial's build-time
-/// magic (`build_vial.mk` defines `SERIAL_NUMBER="vial:f64c2b3c"`). This is a
-/// descriptor-only scan: no HID device is opened.
+/// Enumerate the raw-HID interfaces that look like Vial or VIA keyboards.
+pub fn list() -> Result<Vec<HidDescriptor>> {
+    Ok(list_all()?
+        .into_iter()
+        .filter(|device| device.usage_page == HID_USAGE_PAGE && device.usage == HID_USAGE)
+        .collect())
+}
+
+/// A protocol response counts as Vial when the version is in the supported
+/// range and the UID is non-zero. A plain VIA keyboard echoes/unhandles the
+/// command, producing 0xFE/0xFF values that fail this check.
+fn looks_like_vial(id: &VialId) -> bool {
+    (1..=VIAL_PROTOCOL_MAX).contains(&id.protocol) && id.uid != [0u8; 8]
+}
+
+fn probe_vial(path: &str) -> bool {
+    let Ok(mut transport) = open_path(path) else {
+        return false;
+    };
+    VialDevice::new(&mut transport)
+        .vial_id()
+        .is_ok_and(|id| looks_like_vial(&id))
+}
+
+/// Enumerate Vial keyboards. Builds made by `build_vial.mk` carry
+/// `SERIAL_NUMBER="vial:f64c2b3c"`, which is enough to classify them without
+/// opening the device. Some 2.4G receivers and third-party builds do not
+/// forward that serial string, so interfaces without it get one read-only
+/// `vial_get_keyboard_id` probe as a fallback.
 pub fn list_vial_devices() -> Vec<VialDeviceInfo> {
     let Ok(descriptors) = list() else {
         return Vec::new();
     };
     descriptors
         .into_iter()
-        .filter(|descriptor| descriptor.is_vial)
+        .filter(|descriptor| descriptor.is_vial || probe_vial(&descriptor.path))
         .map(|descriptor| VialDeviceInfo {
             name: if descriptor.product.is_empty() {
                 "Vial keyboard".into()
@@ -163,5 +194,22 @@ impl RawHid for VialHid {
             return Err(VialError::Timeout);
         }
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_supported_nonzero_vial_ids_are_accepted() {
+        let uid = *b"VIALDEMO";
+        assert!(looks_like_vial(&VialId { protocol: 6, uid }));
+        assert!(!looks_like_vial(&VialId { protocol: 0, uid }));
+        assert!(!looks_like_vial(&VialId { protocol: 7, uid }));
+        assert!(!looks_like_vial(&VialId {
+            protocol: 6,
+            uid: [0; 8]
+        }));
     }
 }
