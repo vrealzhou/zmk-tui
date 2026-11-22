@@ -1,0 +1,87 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build, for example v0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  macos-universal:
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Resolve release tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
+
+      - name: Check out release tag
+        run: git checkout "$TAG"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build universal binary
+        run: |
+          export COPYFILE_DISABLE=1
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+          mkdir -p dist
+          lipo -create \
+            -output dist/zmk-tui \
+            target/aarch64-apple-darwin/release/zmk-tui \
+            target/x86_64-apple-darwin/release/zmk-tui
+          codesign --force --sign - dist/zmk-tui
+          lipo -info dist/zmk-tui
+          cp LICENSE dist/LICENSE
+          tar -czf "dist/zmk-tui-${VERSION}-universal-apple-darwin.tar.gz" -C dist zmk-tui LICENSE
+          shasum -a 256 "dist/zmk-tui-${VERSION}-universal-apple-darwin.tar.gz" | tee dist/sha256
+          echo "SHA=$(cut -d' ' -f1 dist/sha256)" >> "$GITHUB_ENV"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          files: dist/zmk-tui-*-universal-apple-darwin.tar.gz
+          generate_release_notes: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update Homebrew formula
+        run: |
+          git checkout main
+          git pull --ff-only origin main
+          python3 tools/update_formula.py "$TAG" "$SHA" "$GITHUB_REPOSITORY"
+          if git diff --quiet -- Formula/zmk-tui.rb; then
+            echo "formula already up to date"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/zmk-tui.rb
+          git commit -m "chore: update Homebrew formula for ${TAG}"
+          git push origin main
