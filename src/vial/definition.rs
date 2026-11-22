@@ -158,19 +158,22 @@ impl KeyboardDefinition {
                             std::collections::btree_map::Entry::Vacant(entry) => {
                                 let index = definition.keys.len();
                                 entry.insert(index);
-                                let (key_x, key_y) =
-                                    rotated_topleft(x, y, rotation, rotation_x, rotation_y);
+                                let (key_x, key_y, key_w, key_h) = rotated_geometry(
+                                    x, y, width, height, rotation, rotation_x, rotation_y,
+                                );
                                 definition.keys.push(KeyPosition {
                                     row,
                                     col,
-                                    // The TUI draws axis-aligned boxes, so bake
-                                    // the KLE rotation into x/y instead of
-                                    // storing an angle it would ignore.
+                                    // The TUI draws axis-aligned 1u boxes, so a
+                                    // rotated key is represented by its rotated
+                                    // centre x and its unrotated row y. This
+                                    // keeps thumb clusters on one row instead of
+                                    // inheriting a rotated bounding-box offset.
                                     geometry: KeyGeometry {
                                         x: key_x,
                                         y: key_y,
-                                        width,
-                                        height,
+                                        width: key_w,
+                                        height: key_h,
                                         ..Default::default()
                                     },
                                 });
@@ -231,20 +234,30 @@ fn dimension(matrix: &Value, field: &str) -> Result<u8> {
         .ok_or_else(|| VialError::Definition(format!("matrix.{field} out of range")))
 }
 
-/// Apply a KLE rotation around `(origin_x, origin_y)` to a key's top-left.
-/// Positive angles follow KLE's screen-coordinate convention (clockwise).
-fn rotated_topleft(x: f32, y: f32, angle: f32, origin_x: f32, origin_y: f32) -> (f32, f32) {
+/// Represent a KLE rotated key as an axis-aligned 1u cell. The terminal UI
+/// cannot rotate boxes, so use the rotated centre for the horizontal fan while
+/// keeping the key's original row. Carrying the rotated bounding-box y as well
+/// made 1.5u thumb keys drift several rows below their siblings.
+fn rotated_geometry(
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    angle: f32,
+    origin_x: f32,
+    origin_y: f32,
+) -> (f32, f32, f32, f32) {
     if angle == 0.0 {
-        return (x, y);
+        return (x, y, width, height);
     }
     let radians = angle.to_radians();
     let (sin, cos) = radians.sin_cos();
-    let dx = x - origin_x;
-    let dy = y - origin_y;
-    (
-        origin_x + dx * cos - dy * sin,
-        origin_y + dx * sin + dy * cos,
-    )
+    let center_x = x + width / 2.0;
+    let center_y = y + height / 2.0;
+    let dx = center_x - origin_x;
+    let dy = center_y - origin_y;
+    let rotated_x = origin_x + dx * cos - dy * sin;
+    (rotated_x - 0.5, y, 1.0, 1.0)
 }
 
 fn number(value: Option<&Value>) -> f32 {
@@ -325,7 +338,7 @@ mod tests {
     }
 
     #[test]
-    fn rotation_clusters_are_baked_into_absolute_positions() {
+    fn rotation_clusters_stay_aligned_on_one_row() {
         let json = br##"{
             "matrix": {"rows": 1, "cols": 3},
             "layouts": {"keymap": [
@@ -338,8 +351,9 @@ mod tests {
         let first = definition.keys[0].geometry;
         let rotated = definition.keys[1].geometry;
         assert_eq!((first.x, first.y), (4.0, 0.0));
-        assert!((rotated.x - 5.2723).abs() < 0.001, "{rotated:?}");
-        assert!((rotated.y - 4.2859).abs() < 0.001, "{rotated:?}");
+        assert!((rotated.x - 5.1261).abs() < 0.001, "{rotated:?}");
+        assert!((rotated.y - 4.25).abs() < 0.001, "{rotated:?}");
+        assert_eq!((rotated.width, rotated.height), (1.0, 1.0));
         // After a rotated row the cursor returns to the cluster origin, not 0.
         let after = definition.keys[2].geometry;
         assert!((after.x - 5.0).abs() < 0.001, "{after:?}");

@@ -251,7 +251,7 @@ reserved-layer setup.
 
 ## Known limitations
 
-- Rotated keys are rendered unrotated; KLE rotation clusters (`r`/`rx`/`ry`) are baked into their positions, and navigation still uses physical centres.
+- Rotated keys are rendered unrotated; KLE rotation clusters (`r`/`rx`/`ry`) use their rotated centre x on their original row, and navigation still uses physical centres.
 - Rotary encoder bindings are not exposed by the current Studio protocol.
   Sofle's two encoder push-buttons are ordinary editable key positions.
 - A behavior's first advertised parameter signature is used.
