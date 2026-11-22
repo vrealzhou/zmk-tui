@@ -22,7 +22,7 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: main
           fetch-depth: 0
@@ -64,7 +64,7 @@ jobs:
           echo "SHA=$(cut -d' ' -f1 dist/sha256)" >> "$GITHUB_ENV"
 
       - name: Publish release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.TAG }}
           files: dist/zmk-tui-*-universal-apple-darwin.tar.gz
