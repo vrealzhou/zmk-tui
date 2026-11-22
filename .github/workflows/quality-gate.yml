@@ -30,7 +30,4 @@ jobs:
           cargo kani setup
 
       - name: Run quality gate
-        run: bash tools/quality-gate.sh
-        env:
-          SKIP_CRAP: "1"
-          SKIP_MUTATION: "1"
+        run: bash tools/ci-gate.sh

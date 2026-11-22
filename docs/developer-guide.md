@@ -304,11 +304,11 @@ It runs, in order:
    codec, mutation score **≥ 90%** (currently 19/20, the survivor being an
    equivalent allocation-size mutant).
 
-CI runs the subset in
+CI runs the subset through [`../tools/ci-gate.sh`](../tools/ci-gate.sh) in
 [`../.github/workflows/quality-gate.yml`](../.github/workflows/quality-gate.yml)
-on macOS: it installs Kani and calls the gate with
+on macOS: it installs Kani and the wrapper hardcodes
 `SKIP_CRAP=1 SKIP_MUTATION=1`. Coverage, CRAP and mutation are local-only
-checks, so CI does not upload those artifacts.
+checks, so CI does not install their tools or upload those artifacts.
 
 ### CRAP and coverage
 

@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Local/CI quality gate:
-#   formatting + clippy, unit tests, integration tests, Kani.
-#   CRAP/coverage and mutation are local-only checks; CI sets
-#   SKIP_CRAP=1 SKIP_MUTATION=1.
+# Full local quality gate:
+#   formatting + clippy, unit tests, integration tests, CRAP/coverage, Kani,
+#   mutation. CI uses tools/ci-gate.sh, which skips the two local-only metrics.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
