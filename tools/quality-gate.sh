@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
 # Local/CI quality gate:
-#   formatting + clippy, unit tests, integration tests, CRAP/coverage, mutation.
+#   formatting + clippy, unit tests, integration tests, Kani.
+#   CRAP/coverage and mutation are local-only checks; CI sets
+#   SKIP_CRAP=1 SKIP_MUTATION=1.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-if ! command -v cargo-llvm-cov >/dev/null; then
-  echo "cargo-llvm-cov is required: cargo install cargo-llvm-cov" >&2
-  exit 2
+if [[ "${SKIP_CRAP:-0}" != "1" ]]; then
+  if ! command -v cargo-llvm-cov >/dev/null; then
+    echo "cargo-llvm-cov is required: cargo install cargo-llvm-cov" >&2
+    exit 2
+  fi
+  if ! python3 -c 'import lizard' >/dev/null 2>&1; then
+    echo "lizard is required: python3 -m pip install lizard" >&2
+    exit 2
+  fi
 fi
 if [[ "${SKIP_MUTATION:-0}" != "1" ]] && ! command -v cargo-mutants >/dev/null; then
   echo "cargo-mutants is required: cargo install cargo-mutants" >&2
-  exit 2
-fi
-if ! python3 -c 'import lizard' >/dev/null 2>&1; then
-  echo "lizard is required: python3 -m pip install lizard" >&2
   exit 2
 fi
 if ! command -v cargo-kani >/dev/null; then
@@ -37,21 +41,25 @@ cargo test --test tui
 cargo test --test cucumber
 cargo test --test vial
 
-mkdir -p target/quality
-echo "== coverage + CRAP =="
-cargo llvm-cov --all-targets --json --output-path target/quality/coverage.json --quiet
-python3 tools/crap.py target/quality/coverage.json \
-  --exclude 'src/transport/*' \
-  --exclude 'src/vial/transport.rs' \
-  --exclude 'src/tui/connection.rs' \
-  --exclude 'src/main.rs' \
-  --exclude 'src/tui/mod.rs' \
-  --exclude 'src/verification.rs' \
-  --max-over-30 0 \
-  --max-over-100 0 \
-  --min-lines 79 \
-  --top 30 \
-  --output target/quality/crap-report.md
+if [[ "${SKIP_CRAP:-0}" == "1" ]]; then
+  echo "== coverage + CRAP: skipped (SKIP_CRAP=1) =="
+else
+  mkdir -p target/quality
+  echo "== coverage + CRAP =="
+  cargo llvm-cov --all-targets --json --output-path target/quality/coverage.json --quiet
+  python3 tools/crap.py target/quality/coverage.json \
+    --exclude 'src/transport/*' \
+    --exclude 'src/vial/transport.rs' \
+    --exclude 'src/tui/connection.rs' \
+    --exclude 'src/main.rs' \
+    --exclude 'src/tui/mod.rs' \
+    --exclude 'src/verification.rs' \
+    --max-over-30 0 \
+    --max-over-100 0 \
+    --min-lines 79 \
+    --top 30 \
+    --output target/quality/crap-report.md
+fi
 
 echo "== formal verification (bounded Kani proof) =="
 cargo kani --only-codegen

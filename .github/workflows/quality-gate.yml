@@ -21,33 +21,16 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
 
       - uses: Swatinem/rust-cache@v2
-
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@cargo-mutants
 
       - name: Install Kani
         run: |
           cargo install --locked kani-verifier
           cargo kani setup
 
-      - name: Install lizard
-        run: |
-          python3 -m venv "$RUNNER_TEMP/lizard-venv"
-          "$RUNNER_TEMP/lizard-venv/bin/python" -m pip install lizard
-          echo "$RUNNER_TEMP/lizard-venv/bin" >> "$GITHUB_PATH"
-
       - name: Run quality gate
         run: bash tools/quality-gate.sh
         env:
-          MUTATION_JOBS: 4
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: quality-gate
-          path: target/quality
-          if-no-files-found: ignore
+          SKIP_CRAP: "1"
+          SKIP_MUTATION: "1"

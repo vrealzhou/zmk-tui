@@ -269,12 +269,17 @@ positions, matching how pointing devices are wired into a ZMK matrix.
 
 ### Quality gate
 
-The local/CI gate is [`../tools/quality-gate.sh`](../tools/quality-gate.sh).
-Prerequisites: `cargo-llvm-cov`, `cargo-mutants`, Kani and
-`python3 -m pip install lizard`.
+The full local gate is [`../tools/quality-gate.sh`](../tools/quality-gate.sh).
+Prerequisites for the local gate: `cargo-llvm-cov`, `cargo-mutants`, Kani and
+`python3 -m pip install lizard`. CI only installs Kani.
 
 ```bash
+# Full local gate, including CRAP/coverage and mutation testing:
 bash tools/quality-gate.sh
+
+# CI-equivalent subset: formatting, clippy, tests and Kani:
+SKIP_CRAP=1 SKIP_MUTATION=1 bash tools/quality-gate.sh
+
 # Skip only the slow mutation stage while iterating:
 SKIP_MUTATION=1 bash tools/quality-gate.sh
 ```
@@ -285,7 +290,7 @@ It runs, in order:
 2. unit tests (`--lib`, `--bins`);
 3. integration tests (`tests/client.rs`, `tests/tui.rs`, `tests/cucumber.rs`,
    `tests/vial.rs`);
-4. coverage + CRAP budgets:
+4. coverage + CRAP budgets (local only; skipped when `SKIP_CRAP=1`):
    - exclude `src/transport/**`, `src/vial/transport.rs`,
      `src/tui/connection.rs`, `src/main.rs`, `src/tui/mod.rs`,
      `src/verification.rs` (hardware/entry glue is not part of the CRAP gate;
@@ -295,14 +300,15 @@ It runs, in order:
    - line coverage: **≥ 79%**;
 5. formal verification: Kani codegen for all harnesses plus the fast
    `encode_escapes_each_reserved_single_byte` proof;
-6. mutation testing: frame codec, mutation score **≥ 90%** (currently 19/20,
-   the survivor being an equivalent allocation-size mutant).
+6. mutation testing (local only; skipped when `SKIP_MUTATION=1`): frame
+   codec, mutation score **≥ 90%** (currently 19/20, the survivor being an
+   equivalent allocation-size mutant).
 
-CI runs the same gate in
+CI runs the subset in
 [`../.github/workflows/quality-gate.yml`](../.github/workflows/quality-gate.yml)
-on macOS, installing `cargo-llvm-cov`, `cargo-mutants` and Kani. Artifacts
-(`target/quality/coverage.json`, `crap-report.md`, mutation outcomes) are
-uploaded even when the gate fails.
+on macOS: it installs Kani and calls the gate with
+`SKIP_CRAP=1 SKIP_MUTATION=1`. Coverage, CRAP and mutation are local-only
+checks, so CI does not upload those artifacts.
 
 ### CRAP and coverage
 
