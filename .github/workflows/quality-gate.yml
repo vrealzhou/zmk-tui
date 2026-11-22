@@ -35,7 +35,10 @@ jobs:
           cargo kani setup
 
       - name: Install lizard
-        run: python3 -m pip install --user lizard
+        run: |
+          python3 -m venv "$RUNNER_TEMP/lizard-venv"
+          "$RUNNER_TEMP/lizard-venv/bin/python" -m pip install lizard
+          echo "$RUNNER_TEMP/lizard-venv/bin" >> "$GITHUB_PATH"
 
       - name: Run quality gate
         run: bash tools/quality-gate.sh
